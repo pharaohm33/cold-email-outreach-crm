@@ -71,9 +71,15 @@ if(S.settings.emailBody==="{Hi|Hey|Hello} there,\n\n{I just watched|I caught|I w
 if(S.settings.emailBody==="{Hi|Hey|Hello} there,\n\n{I just watched|I caught|I watched} your recent episode on {niche} and {loved it|really enjoyed it}.\n\n{personal_line}\n\nI cut a short clip from it that I think could do well on Reels, TikTok and Shorts:\n\n{clip_link}\n\n{It is yours to post, free, no strings attached.|Feel free to post it, it is yours, no strings attached.} If you'd like a few of these each week, just reply and I'll send you more.\n\n{Thanks|Best|Cheers},\n{sender}")S.settings.emailBody=DEF.settings.emailBody;
 if(S.settings.emailBody==="{Hi|Hey|Hello} there,\n\n{I just watched|I caught|I watched} your recent episode on {niche} and {loved it|really enjoyed it}. I cut a short clip from it that I think could do well on Reels, TikTok and Shorts:\n\n{clip_link}\n\n{It is yours to post, free, no strings attached.|Feel free to post it, it is yours, no strings attached.} If you'd like a few of these each week, just reply and I'll send you more.\n\n{Thanks|Best|Cheers},\n{sender}")S.settings.emailBody=DEF.settings.emailBody;
 if(/[—–]/.test(S.settings.dm)||S.settings.dm.startsWith('Hey! Just watched your latest'))S.settings.dm=DEF.settings.dm;
-const TAB_ID=Math.random().toString(36).slice(2);
-function isLeader(){try{const L=JSON.parse(localStorage.getItem('clipperLead')||'{}'),now=Date.now();if(!L.id||L.id===TAB_ID||now-L.t>150000){localStorage.setItem('clipperLead',JSON.stringify({id:TAB_ID,t:now}));return true}return false}catch(e){return true}}
-setInterval(isLeader,20000);   /* only one open CRM tab runs the automatic top-up and uploads; the others leave it alone */
+const TAB_ID=Math.random().toString(36).slice(2),SEEN_TABS={};
+let TABCH=null;try{TABCH=new BroadcastChannel('clipperCRMtabs');TABCH.onmessage=e=>{const m=e.data||{};if(!m.id||m.id===TAB_ID)return;if(m.t==='bye')delete SEEN_TABS[m.id];else SEEN_TABS[m.id]=Date.now();if(m.t==='hello'){try{TABCH.postMessage({t:'beat',id:TAB_ID})}catch(_){}}}}catch(e){}
+const tabSay=t=>{try{TABCH&&TABCH.postMessage({t,id:TAB_ID})}catch(e){}};
+const otherTabs=()=>Object.values(SEEN_TABS).filter(t=>Date.now()-t<70000).length;   /* other CRM tabs of this browser that answered in the last ~70 s (a hidden tab beats about once a minute) */
+function leadLock(){try{return JSON.parse(localStorage.getItem('clipperLead')||'{}')}catch(e){return {}}}
+function isLeader(){try{const L=leadLock(),now=Date.now();
+ if(!L.id||L.id===TAB_ID||(TABCH?otherTabs()===0:now-L.t>60000)){localStorage.setItem('clipperLead',JSON.stringify({id:TAB_ID,t:now}));return true}return false}catch(e){return true}}
+tabSay('hello');setInterval(()=>{tabSay('beat');isLeader()},10000);
+window.addEventListener('beforeunload',()=>tabSay('bye'));window.addEventListener('pagehide',()=>{tabSay('bye');try{if(leadLock().id===TAB_ID)localStorage.removeItem('clipperLead')}catch(e){}});
 let syncT,syncMsg='';
 function setSync(m){syncMsg=m;const e=document.getElementById('sync');if(e)e.textContent=m}
 /* Two CRM tabs (the one that opens at login plus yours) share one saved copy. When the other tab saved something newer, take it over IN PLACE: objects a running job already holds
@@ -127,10 +133,10 @@ function stats(){
   fresh:S.leads.filter(l=>l.status=='New').length,fu:S.leads.filter(l=>l.status=='Sample Sent'&&l.follow&&l.follow<=today()).length,...mrrStats()}}
 function mrrStats(){const act=(S.retainers||[]).filter(r=>r.status=='Active'),mrr=act.reduce((a,r)=>a+(+r.fee||0),0);return{mrr,act:act.length,clipsM:act.reduce((a,r)=>a+(+r.clips||0),0),avgFee:act.length?mrr/act.length:0}}
 function render(){nav();({dash,today:todayV,leads,email:emailV,audit:auV,unibox:uniboxV,calls:callsV,ads:adsV,find,money:moneyV,guide:guideV,settings})[tab]()}
-function dash(){const s=stats(),g=S.settings;const pct=Math.min(100,s.earned/g.goal*100);
+function dash(){const s=stats(),g=S.settings;const pct=Math.min(100,s.earned/g.goal*100);const chanCard=(S.adLeads||[]).some(l=>l.loomLink||l.cformSent)?`<div class="card"><b>Meta ads outreach, by channel</b><div class=mut style="margin-top:4px">${channelLine()}</div></div>`:'';
  const days=[...Array(14)].map((_,i)=>{const d=iso(new Date(Date.now()-(13-i)*864e5));return[d,sentOn(d)]});const mx=Math.max(g.daily,...days.map(x=>x[1]));
  const byInf={};S.payments.forEach(p=>{(byInf[p.who]=byInf[p.who]||{all:0,mo:0}).all+=p.amount;if(p.date.startsWith(monthKey()))byInf[p.who].mo+=p.amount});
- $('#main').innerHTML=`<div class="card"><b>${money(s.earned)}</b> of ${money(g.goal)} this month<div class="bar"><i style="width:${pct}%"></i></div>
+ $('#main').innerHTML=`${chanCard}<div class="card"><b>${money(s.earned)}</b> of ${money(g.goal)} this month<div class="bar"><i style="width:${pct}%"></i></div>
  <span class="mut">Need ${money(s.remaining/s.dl)}/day for ${s.dl} more days · Profit after team pay: ${money(s.earned-s.owed)}</span></div>
  <div class="card" style="border-color:var(--ok)"><b>${money(s.mrr)}</b> monthly recurring revenue (MRR) · ${s.act} active retainer${s.act==1?'':'s'} · ${s.clipsM} clips/month<div class="bar"><i style="width:${Math.min(100,s.mrr/g.goal*100)}%"></i></div>
  <span class="mut">${s.mrr>=g.goal?'Your retainers cover the monthly goal.':`Need ${money(g.goal-s.mrr)} more MRR, about ${Math.ceil((g.goal-s.mrr)/(s.avgFee||500))} more clients at ${money(s.avgFee||500)}${s.avgFee?' (your average)':''}.`}</span></div>
@@ -850,6 +856,7 @@ const isBounced=l=>!!(l.bounced||l.queueStatus==='bounced');
 const cfDomain=l=>String(l.email||'').split('@')[1]||'';
 function cformRoute(l){   // 'wait' (no Loom link yet) | 'check' (form not looked for yet) | 'form-auto' | 'human' (CAPTCHA etc., waiting for you) | 'form-done' | 'email'
  if(S.settings.cformOn===false)return 'email';
+ if(l.queueStatus==='sending')return 'email';
  const sent=l.cformSent&&l.cformSent.status,c=l.cform;
  if(sent==='sent'||sent==='unsure')return 'form-done';
  if(!l.loomLink)return 'wait';
@@ -877,8 +884,9 @@ async function cformSendAuto(manual){const by=id=>(S.adLeads||[]).find(x=>x.id==
  if(!S.settings.cformConfirmed){if(!manual)return 0;if(!await cformConfirmOnce())return 0}
  await loadEmailStatus();if(!(ES.status&&ES.status.in_send_window)){CF.msg='Forms are waiting for sending hours.';return 0}
  await metaGreet(list);let sent=0;
- const ok=await helperJob('/cform/send',{confirm:true,values:cformVals(),items:list.map(l=>({id:l.id,url:l.cform.url,message:cformText(l)}))},t=>{const r=parseTag(t,'CFORMSEND');if(!r)return;const l=by(r.id);if(!l)return;
-  if(r.status==='later')return;l.cformSent={at:Date.now(),status:r.status,note:r.note||''};if(r.status==='sent'||r.status==='unsure')sent++;save()});
+ for(const l of list){if(l.queueStatus==='scheduled'){try{const r=await metaApi('/queue/cancel',{id:l.id});if(r&&r.ok!==false){l.cformMoved=Date.now();delete l.queueStatus}}catch(e){}}}   /* the email was waiting for a slot (the inboxes are full for today): the form goes out instead, so they are never contacted twice */
+ const ok=await helperJob('/cform/send',{confirm:true,limit:Math.max(1,Math.min(100,+S.settings.cformDaily||25)),values:cformVals(),items:list.map(l=>({id:l.id,url:l.cform.url,message:cformText(l)}))},t=>{const r=parseTag(t,'CFORMSEND');if(!r)return;const l=by(r.id);if(!l)return;
+  if(r.status==='later'){if(l.cformMoved){l.cformSkip=true}return}l.cformSent={at:Date.now(),status:r.status,note:r.note||''};if(r.status==='sent'||r.status==='unsure')sent++;save()});
  return sent}
 async function cformStep(){if(S.settings.cformOn===false)return;try{const f=await cformFind(10);if(f)CF.msg=`${f} contact form(s) found.`;await cformSendAuto(false)}catch(e){}}
 async function cformBatchRun(){const by=id=>(S.adLeads||[]).find(x=>x.id==id);
@@ -897,6 +905,8 @@ function channelStats(){const L=(S.adLeads||[]).filter(l=>stratOf(l)==='loom'||l
  const fm=L.filter(l=>l.cformSent&&/sent|unsure/.test(l.cformSent.status)),fmRep=fm.filter(l=>l.cformReply),human=L.filter(l=>cformRoute(l)==='human'),rec=fm.filter(isBounced);
  return {emSent:em.length,emRep:emRep.length,emRate:pc(emRep.length,em.length),emBnc:emBnc.length,fmSent:fm.length,fmRep:fmRep.length,fmRate:pc(fmRep.length,fm.length),waiting:human.length,auto:L.filter(l=>cformRoute(l)==='form-auto').length,recovered:rec.length}}
 const CF={busy:false,msg:''};
+function channelLine(){const K=channelStats();return `<b>Email:</b> ${K.emSent} sent, ${K.emRep} replied (${K.emRate}), ${K.emBnc} bounced. <b>Contact form:</b> ${K.fmSent} sent, ${K.fmRep} replied (${K.fmRate}), ${K.waiting} waiting for you, ${K.auto} queued${K.recovered?`, ${K.recovered} reached after their email bounced`:''}.`}
+const BUILD='17 Oct, forms first';
 function cformCard(){const K=channelStats(),rows=(S.adLeads||[]).filter(l=>l.cform&&l.cform.found||l.cformSent).sort((a,b)=>((b.cformSent&&b.cformSent.at)||0)-((a.cformSent&&a.cformSent.at)||0)).slice(0,25),
  busy=SO.busy||LM.pipeBusy||ES.busy||CF.busy,nFind=(S.adLeads||[]).filter(l=>l.loomLink&&!l.cform&&!l.cformSkip&&(l.cformTry||0)<2&&!(l.emailedAt&&!isBounced(l))).length;
  const stat=l=>{const r=cformRoute(l),c=l.cform||{},s=l.cformSent||{};
@@ -905,7 +915,7 @@ function cformCard(){const K=channelStats(),rows=(S.adLeads||[]).filter(l=>l.cfo
  return `<div style="margin-top:8px"><div class="row"><label><input type="checkbox" id="cf-on" ${S.settings.cformOn!==false?'checked':''}> <b>Contact forms first.</b> If a lead's website has a contact form, the Loom message goes there instead of email. Email is only for leads without a form.</label></div>
   <div class="mut" style="margin-top:4px">Results by channel. <b>Email:</b> ${K.emSent} sent, ${K.emRep} replied (${K.emRate}), ${K.emBnc} bounced. <b>Contact form:</b> ${K.fmSent} sent, ${K.fmRep} replied (${K.fmRate}), ${K.waiting} waiting for you (CAPTCHA), ${K.auto} queued${K.recovered?`, ${K.recovered} reached after their email bounced`:''}.</div>
   <div class="row" style="margin-top:6px"><button class="b" id="cf-find" ${busy||!nFind?'disabled':''}>Look for contact forms (${nFind} leads)</button><button class="b p" id="cf-send" ${busy||!K.auto?'disabled':''}>Send the ${K.auto} queued form message${K.auto==1?'':'s'} now</button><button class="b p" id="cf-batch" ${busy||!K.waiting?'disabled':''} title="Opens a Chrome window with every CAPTCHA form already filled in. You solve each CAPTCHA, it sends and moves to the next.">Fill the CAPTCHA forms for me (${K.waiting})</button><button class="b" id="cf-rep" ${busy?'disabled':''}>Check for replies</button><span class=mut>${esc(CF.msg||'')}</span></div>
-  <div class="row" style="margin-top:6px"><label>Subject (for forms that ask for one) <input id="cf-subj" value="${esc(cformSubject())}" style="width:260px"></label></div>
+  <div class="row" style="margin-top:6px"><label>Subject (for forms that ask for one) <input id="cf-subj" value="${esc(cformSubject())}" style="width:260px"></label> <label>Forms per day <input id="cf-daily" type="number" min="1" max="100" value="${+S.settings.cformDaily||25}" style="width:60px"></label> <span class=mut>Forms do not use up your email limits: they keep going in sending hours even when every inbox is full for the day. An email still waiting for a slot moves to the form if the site has one.</span></div>
   <details style="margin-top:6px"><summary>The message sent through forms <span class=mut>(the Loom email text by default; {first_name} {business} {loom_link} {sender})</span></summary><textarea id="cf-msg" rows="7" style="width:100%">${esc(S.settings.cformMsg||meta().loomEmail||'')}</textarea><div class="row"><button class="b" id="cf-msg-reset">Use the Loom email text</button></div></details>
   ${rows.length?`<div class="tw" style="margin-top:6px"><table><tr><th>Lead</th><th>Contact form</th><th></th></tr>${rows.map(l=>`<tr><td><b>${esc(l.brandName||l.company)}</b><br><span class=mut>${esc(l.email||'')}</span></td><td>${stat(l)}</td><td>${act(l)}</td></tr>`).join('')}</table></div>`:'<div class="mut" style="margin-top:6px">No contact forms found yet. They are looked for automatically once a lead\'s video is on Loom.</div>'}</div>`}
 function cformWire(){const g=id=>document.getElementById(id);if(!g('cf-on'))return;
@@ -914,9 +924,10 @@ function cformWire(){const g=id=>document.getElementById(id);if(!g('cf-on'))retu
  g('cf-send').onclick=async()=>{CF.busy=true;CF.msg='Sending through contact forms…';adsV();try{const n=await cformSendAuto(true);CF.msg=n?`${n} sent.`:(CF.msg||'Nothing was sent.')}finally{CF.busy=false;save();adsV()}};
  g('cf-batch').onclick=cformBatchRun;
  g('cf-rep').onclick=async()=>{CF.msg='Checking for replies…';adsV();await cformRepliesCheck(true);CF.msg='Replies checked.';adsV()};
+ g('cf-daily').onchange=e=>{S.settings.cformDaily=Math.max(1,Math.min(100,+e.target.value||25));save()};
  g('cf-subj').onchange=e=>{S.settings.cformSubject=e.target.value.trim();save()};
  g('cf-msg').onchange=e=>{S.settings.cformMsg=e.target.value;save()};g('cf-msg-reset').onclick=()=>{delete S.settings.cformMsg;save();adsV()}}
-document.addEventListener('click',e=>{const c=e.target.closest('[data-cfcopy]'),k=e.target.closest('[data-cfskip]');
+document.addEventListener('click',e=>{if(e.target.closest('[data-takeover]')){localStorage.setItem('clipperLead',JSON.stringify({id:TAB_ID,t:Date.now()}));adsV();return}const c=e.target.closest('[data-cfcopy]'),k=e.target.closest('[data-cfskip]');
  if(c){const l=(S.adLeads||[]).find(x=>x.id==c.dataset.cfcopy);if(l){navigator.clipboard.writeText(cformText(l)).catch(()=>{});c.textContent='Copied'}}
  else if(k){const l=(S.adLeads||[]).find(x=>x.id==k.dataset.cfskip);if(l){l.cformSkip=true;save();adsV();if(S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)}}});
 /* ---------- Start outreach: one button. Finds more leads in HALCRUS only when the pool runs low, makes the videos, uploads, drafts, and hands the sends to the helper's own scheduled queue ---------- */
@@ -933,6 +944,7 @@ async function queueSync(){try{const r=await metaApi('/queue/list',{});if(!r||!r
  for(const q of r.items){const parts=String(q.id).split('#fu'),l=(S.adLeads||[]).find(x=>String(x.id)===parts[0]);if(!l)continue;
   if(q.replied)l.replied=true;
   if(parts.length>1){l.fuQueued=Math.max(l.fuQueued||0,q.step||+parts[1]||0);if(q.status==='sent')l.emailStep=Math.max(l.emailStep||0,q.step||+parts[1]||0);continue}
+  if(q.status==='canceled'&&l.cformMoved)continue;   /* cancelled by us because the contact form took over */
   l.queueStatus=q.status;l.sendDue=q.due_at||0;
   if(q.status==='sent'||q.status==='bounced'){if(!l.emailedAt){l.emailedAt=(q.sent_at||0)*1000||Date.now();l.loomSentAt=l.emailedAt}if(!l.firstEmailedAt)l.firstEmailedAt=l.emailedAt;delete l.draftedAt;delete l.skipWhy;if(q.status==='bounced')l.bounced=l.bounced||Date.now()}
   else if(q.status==='skipped')l.skipWhy=q.why||'skipped'}
@@ -1084,7 +1096,8 @@ function startCard(){const st=ES.status||{},w=st.window||SQ.win||{start_hour:9,e
  const step=(n,t,sub)=>`<div style="display:flex;gap:8px;align-items:baseline;margin-top:18px;padding-top:10px;border-top:1px solid var(--bd,#2a3344)"><span style="background:var(--acc);color:#fff;border-radius:50%;min-width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px">${n}</span><b>${t}</b> <span class=mut>${sub||''}</span></div>`;
  const dot=(ok,t)=>`<b style="color:${ok===true?'#22c55e':ok===false?'#e5484d':'#e5a000'}">${t}</b>`;
  const emailChip=ES.status?(st.ready?dot(true,`ready · ${(st.inboxes||[]).filter(i=>!i.paused).length} inboxes · ${st.capacity_left} sends left today`):dot(false,'not set up')):dot(null,'checking…');
- return `<div class="card" style="border-color:var(--acc)"><b>Loom outreach, step by step</b> <span class=mut>Do these in order. Nothing is emailed until step 6. Sending hours: ${w.start_hour}:00 to ${w.end_hour}:00.</span>
+ return `<div class="card" style="border-color:var(--acc)"><b>Loom outreach, step by step</b> <span class=mut>Page version: ${BUILD}.</span> <span class=mut>Do these in order. Nothing is emailed until step 6. Sending hours: ${w.start_hour}:00 to ${w.end_hour}:00.</span>
+  <div class="mut" style="margin-top:6px">${channelLine()}</div>
   ${step(1,'Connect','once; they stay connected')}
   <div class="row" style="margin-top:6px"><span class=mut>Loom: ${dot(LM.connected===null||LM.connected===undefined?null:!!LM.connected,LM.connected?'connected':LM.connected===false?'not connected':'checking…')}</span><button class="b" id="so-lm" ${busy?'disabled':''}>${LM.connected?'Reconnect Loom':'Connect Loom (log in once)'}</button>
    <span class=mut>HALCRUS: ${dot(HC.connected===null||HC.connected===undefined?null:!!HC.connected,HC.connected?'connected':HC.connected===false?'not connected':'checking…')}</span><button class="b" id="so-hc" ${SO.busy||ES.busy?'disabled':''}>${HC.connected?'Reconnect HALCRUS':'Connect HALCRUS (log in once)'}</button>
@@ -1123,7 +1136,7 @@ setInterval(()=>{queueSync().then(()=>{if(tab=='ads'&&!SO.busy&&!LM.pipeBusy&&!E
 setTimeout(()=>{loomClean();loomSyncUploads();queueSync();hcStatus();loomStatus()},3000);
 /* ---------- Keep going by itself: no button press. Every 10 minutes (and when the page opens) it tops the pipeline up, with guards ---------- */
 async function notifyNeeds(title,message,key){try{await fetch(RUNNER+'/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,message,key,every:21600})})}catch(e){}}
-function autoStatusLine(){const g=S.settings;if(!g.autoStart||!g.startConfirmed)return '';let other='';try{const L=JSON.parse(localStorage.getItem('clipperLead')||'{}');if(L.id&&L.id!==TAB_ID&&Date.now()-L.t<150000)other='<div class="mut" style="margin-top:4px;color:#e5a000">Another CRM tab is running the automatic top-up, so this tab does not. That is fine: you can use either, and your changes sync between them. Close the extra tab if you want this one to take over.</div>'}catch(e){}const w=g.autoWhy,beat=g.autoBeat||0,ago=t=>{const m=Math.round((Date.now()-t)/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
+function autoStatusLine(){const g=S.settings;if(!g.autoStart||!g.startConfirmed)return '';let other='';try{const L=leadLock();if(L.id&&L.id!==TAB_ID&&otherTabs()>0)other='<div class="mut" style="margin-top:4px;color:#e5a000">'+otherTabs()+' other CRM tab'+(otherTabs()==1?' is':'s are')+' open in this browser (one may have opened by itself at login) and another one is running the automatic top-up, so this tab does not. Your changes sync between them. <button class="b" data-takeover="1">Run it in this tab instead</button></div>'}catch(e){}const w=g.autoWhy,beat=g.autoBeat||0,ago=t=>{const m=Math.round((Date.now()-t)/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
  const stale=beat&&Date.now()-beat>25*60000&&!SO.busy&&Date.now()>(g.autoStartAfter||0);
  const tm=t=>new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
  return other+`<div class="mut" style="margin-top:4px">Automatic top-up: ${w?`<b>${esc(w.why)}</b>${w.until&&w.until>Date.now()?` Next try about ${tm(w.until)}.`:''} <span>(${ago(w.at)})</span>`:'no check yet.'} ${beat?`<span>Last checked ${ago(beat)}.</span>`:''}${stale?` <b style="color:#e5a000">This page has not checked for a while. Keep this tab open and in front now and then; Chrome can put background tabs to sleep (Settings, Performance, Memory Saver: add this site to the always-active list).</b>`:''}</div>`}

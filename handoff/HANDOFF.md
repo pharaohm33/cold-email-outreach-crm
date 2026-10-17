@@ -97,6 +97,11 @@ By hand, once per computer: in the CRM press "Connect Loom" and log in (the help
 - KPIs (channelStats, shown in the card): email sent / replied / bounced vs contact form sent / replied / waiting / queued / reached after a bounce. Form replies are found by sender domain (cformRepliesCheck every 30 min in the automatic loop, or the "Check for replies" button) and set l.cformReply and l.replied (stops follow-ups; opt-outs set l.dnc and are suppressed).
 - Clip alerts: Telegram/Mac alerts about the podcast clips side (Clipper app restarted/down, Autopilot, drafts from podcast leads) are OFF by default (tools/notify_prefs.json, Settings tab switch, /notify/prefs). The watchdog no longer restarts the Clipper app unless switched on; a clip task starts it on demand (ensure_clipper_up).
 
+## Forms vs email capacity, tab note, where results show (Oct 17)
+- Forms do not use email limits: cformSendAuto only needs sending hours and the form daily limit (S.settings.cformDaily, default 25, sent to /cform/send as limit). An email still waiting for a slot (queueStatus 'scheduled', for example because every inbox is full today) moves to the form when the lead's site has one: the queue entry is cancelled first (l.cformMoved; queueSync ignores that cancel), so nobody is contacted twice; if the form then cannot go out the lead falls back to email (cformSkip) and is re-queued. 'sending' emails are left alone.
+- Tab note: other CRM tabs are detected over a BroadcastChannel (SEEN_TABS, beat every 10 s, alive for 70 s, 'bye' on unload), not by the stale localStorage lock, so a reload no longer shows "other tabs". The note names the count and has "Run it in this tab instead".
+- Channel results (channelLine) now show at the top of the Meta Ads workflow card and on the Dashboard; the card also shows "Page version: <BUILD>" so you can tell a stale cached page.
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

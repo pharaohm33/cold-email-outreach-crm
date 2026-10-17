@@ -756,7 +756,7 @@ def run_cform_send(items, body):
     try:
         import contact_form
         values = cform_values(body)
-        limit = int(cold_email.load_config().get("cform_daily_limit") or 25)
+        limit = int(body.get("limit") or cold_email.load_config().get("cform_daily_limit") or 25)
         for n, it in enumerate(items):
             if PIPE["stop"]:
                 break

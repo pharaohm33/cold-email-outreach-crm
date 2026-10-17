@@ -102,6 +102,9 @@ By hand, once per computer: in the CRM press "Connect Loom" and log in (the help
 - Tab note: other CRM tabs are detected over a BroadcastChannel (SEEN_TABS, beat every 10 s, alive for 70 s, 'bye' on unload), not by the stale localStorage lock, so a reload no longer shows "other tabs". The note names the count and has "Run it in this tab instead".
 - Channel results (channelLine) now show at the top of the Meta Ads workflow card and on the Dashboard; the card also shows "Page version: <BUILD>" so you can tell a stale cached page.
 
+## Step 4 buttons when the helper is busy (Oct 17)
+- The helper runs one job at a time. A click on the step 4 buttons used to be refused (HTTP 409) with no message while an upload or video run was going. Now helperWait() waits for the running job and shows "The helper is busy with <job>, waiting for it to finish…" in the card, then runs; disabled buttons have a tooltip saying why.
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

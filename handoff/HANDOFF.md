@@ -114,6 +114,10 @@ By hand, once per computer: in the CRM press "Connect Loom" and log in (the help
 ## Scaling CAPTCHA forms without solving them (Oct 17)
 - Decision: this code does NOT solve or bypass CAPTCHAs (not an option, even on request). Scale comes from: one press now covers up to 250 forms: captcha_batch keeps a rolling window of 8 pre-filled tabs, and as each CAPTCHA is solved by the user the form is sent, its tab closes and the next opens (page slice and /cform/batch cap 250), a CAPTCHA form not solved within S.settings.cformFallbackHours (default 48, 0 = never; field in step 4) falls back to the email route (cformRoute 'email'), and a phone alert ('CAPTCHA forms waiting', every 6 h) fires when 10 or more are waiting. Invisible reCAPTCHA v3 forms (no challenge shown) are still filled and sent normally.
 
+## The stuck CAPTCHA form (Lenox, Oct 17)
+- Cause: the page had a hidden g-recaptcha-response textarea outside any <form>, so the extractor built a second 'virtual' form around it and restamped the same fields (data-cf-f), so filling the first form failed ("could not fill the last field"); the required Subject drop-down was also unfillable, so the whole form came back needs_human on every press of the button and stayed in the queue.
+- Fixes (contact_form.py): the extractor ignores captcha answer boxes and never reuses a stamp for another field; visible labels decide what a field is ("Full name" is the name field); hidden fields are left alone; a required drop-down gets a harmless general option when one fits (Other/General, then business-type, then inquiry/feedback; never order/return/account ones); the batch fills leniently: when something is left for a person (an unfillable required choice) the tab still opens with everything else filled and YOU press send yourself (the code only watches for the confirmation); the page gives up on a form that returned needs_human 3 times (route 'email').
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

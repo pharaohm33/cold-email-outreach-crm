@@ -864,6 +864,7 @@ function cformRoute(l){   // 'wait' (no Loom link yet) | 'check' (form not looke
  if(!c)return (l.emailedAt&&!isBounced(l))?'email':'check';
  if(!c.found)return 'email';
  if(l.emailedAt&&!isBounced(l))return 'email';   // already emailed and not bounced: leave it with email
+ if(sent==='needs_human'&&(l.cformTries||0)>=3)return 'email';   // a form that kept failing is not worth more of your time
  if(c.captcha==='visible'||c.needs_human||sent==='needs_human'){const h=S.settings.cformFallbackHours===undefined?48:+S.settings.cformFallbackHours;if(h>0&&Date.now()-(c.at||0)>h*3600e3)return 'email';return 'human'}
  return 'form-auto'}
 const emailRoute=l=>cformRoute(l)==='email';
@@ -895,7 +896,7 @@ async function cformBatchRun(){const by=id=>(S.adLeads||[]).find(x=>x.id==id);
  if(!confirm(`A Chrome window opens and works through ${list.length} contact form${list.length==1?'':'s'}, 8 tabs at a time, each already filled in with your message and Loom link.\n\nSolve the CAPTCHA in a tab and the form is sent by itself, the tab closes and the next form opens, until the list is done. A tab you do not get to within 10 minutes is closed and that lead stays saved for later.\n\nThe CAPTCHAs are yours to solve; nothing here solves them for you.\n\nStart?`))return;
  CF.busy=true;CF.msg=`Working through ${list.length} form(s) in a Chrome window, 8 at a time. Solve each CAPTCHA there.`;adsV();await metaGreet(list);
  try{await helperJob('/cform/batch',{confirm:true,values:cformVals(),items:list.map(l=>({id:l.id,url:l.cform.url,message:cformText(l)}))},t=>{const r=parseTag(t,'CFORMSEND');if(!r)return;const l=by(r.id);if(!l)return;
-  if(r.status==='later'){l.cformLaterAt=Date.now();l.cformLaterNote=r.note||''}else l.cformSent={at:Date.now(),status:r.status,note:r.note||'',shot:r.shot||''};save();adsV()})}finally{CF.busy=false;CF.msg='';save();adsV()}}
+  if(r.status==='later'){l.cformLaterAt=Date.now();l.cformLaterNote=r.note||''}else{l.cformSent={at:Date.now(),status:r.status,note:r.note||'',shot:r.shot||''};if(r.status==='needs_human')l.cformTries=(l.cformTries||0)+1}save();adsV()})}finally{CF.busy=false;CF.msg='';save();adsV()}}
 async function cformRepliesCheck(force){const g=S.settings;if(!force&&Date.now()-(g.cformRepAt||0)<30*60000)return;
  const items=(S.adLeads||[]).filter(l=>l.cformSent&&/sent|unsure/.test(l.cformSent.status)&&!l.cformReply&&Date.now()-(l.cformSent.at||0)<21*864e5).map(l=>({id:l.id,domain:cfDomain(l),email:l.email,since_ts:Math.floor((l.cformSent.at||Date.now())/1000)-3600}));
  g.cformRepAt=Date.now();if(!items.length)return;

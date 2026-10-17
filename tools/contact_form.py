@@ -105,6 +105,9 @@ def field_kind(f):
         return "file"
     if tag == "select":
         return "select"
+    shown = " ".join(str(f.get(k, "")) for k in ("ph", "aria", "label")).lower()
+    if t == "text" and re.search(r"full[\s_-]*name|your[\s_-]*name|^\s*name\b", shown) and not re.search(r"company|business|first|last", shown):
+        return "name"
     if t == "email" or re.search(r"e-?mail", txt):
         return "email"
     if t == "tel" or re.search(r"phone|mobile|\btel\b|telephone", txt):
@@ -186,22 +189,22 @@ def candidates_from(base, page):
 
 # ------------------------------------------------------------------------------------------------ the browser way
 EXTRACT_JS = r"""() => {
-  let n = 0;
+  window.__cfn = window.__cfn || 0;
   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
   const info = e => ({tag: e.tagName.toLowerCase(), type: (e.type || '').toLowerCase(), name: e.name || '', id: e.id || '', ph: e.placeholder || '', aria: e.getAttribute('aria-label') || '',
      label: ((e.labels && e.labels[0]) ? e.labels[0].innerText : '') || '', req: !!e.required || e.getAttribute('aria-required') === 'true', value: e.value || '', vis: vis(e),
-     cf: (e.setAttribute('data-cf-f', String(++n)), String(n))});
+     cf: e.getAttribute('data-cf-f') || (e.setAttribute('data-cf-f', String(++window.__cfn)), String(window.__cfn))});
   const roots = new Map();
   document.querySelectorAll('form').forEach(f => roots.set(f, 'form'));
-  document.querySelectorAll('textarea').forEach(t => { if (!t.closest('form')) { let p = t; for (let i = 0; i < 4 && p.parentElement; i++) p = p.parentElement; roots.set(p, 'virtual'); } });
+  document.querySelectorAll('textarea').forEach(t => { if (!t.closest('form') && vis(t) && !/captcha/i.test(t.name || t.id || '')) { let p = t; for (let i = 0; i < 4 && p.parentElement; i++) p = p.parentElement; roots.set(p, 'virtual'); } });
   const out = [];
   let k = 0;
   roots.forEach((kind, r) => {
     if (!vis(r) && kind === 'virtual') return;
-    r.setAttribute('data-cf-form', String(++k));
+    r.setAttribute('data-cf-form', r.getAttribute('data-cf-form') || String(++k));
     const fields = [...r.querySelectorAll('input,textarea,select')].map(info);
     const cap = r.querySelector('.g-recaptcha,.h-captcha,.cf-turnstile,iframe[src*=recaptcha],iframe[src*=hcaptcha],iframe[src*=turnstile]');
-    out.push({idx: String(k), kind, action: r.getAttribute('action') || '', id: r.id || '', cls: (r.className && r.className.toString()) || '', fields,
+    out.push({idx: r.getAttribute('data-cf-form'), kind, action: r.getAttribute('action') || '', id: r.id || '', cls: (r.className && r.className.toString()) || '', fields,
               cap: cap ? ((cap.getAttribute('data-size') === 'invisible') ? 'invisible' : 'visible') : '', vis: vis(r), buttons: [...r.querySelectorAll('button,input[type=submit]')].map(b => (b.innerText || b.value || '').trim())});
   });
   return out;
@@ -378,9 +381,25 @@ def _form_closed(root):
         return True
 
 
-def fill_form(pg, values):
+def _pick_option(el):
+    """A required drop-down: choose a harmless, general option when one clearly fits. 'Other' / 'General' first, then business-type ones, then 'inquiry', 'question' or 'feedback'.
+    Anything about orders, returns, accounts or problems is never picked. None when nothing fits (a person decides)."""
+    try:
+        opts = el.evaluate("e => [...e.options].filter(o => !o.disabled && o.value !== '').map(o => o.text.trim())")
+    except Exception:
+        return None
+    bad = re.compile(r"order|return|refund|shipping|complaint|problem|issue|account|login|password|damage|missing|cancel|payment|billing|warranty|repair", re.I)
+    for tier in (r"other|general|something else|not listed", r"business|partner|market|advertis|sales|wholesale|press|media", r"inquir|enquir|question|feedback|comment"):
+        for o in opts:
+            if re.search(tier, o, re.I) and not bad.search(o):
+                return o
+    return None
+
+
+def fill_form(pg, values, lenient=False):
     """Finds the contact form on the loaded page and fills it in WITHOUT sending it.
-    Returns {ok, root, btn, form, captcha} or {ok: False, status, note} (status 'needs_human' or 'failed')."""
+    Returns {ok, root, btn, form, captcha, missing} or {ok: False, status, note} (status 'needs_human' or 'failed').
+    lenient=True (a person is at the screen): a field that cannot be filled is listed in `missing` instead of giving up on the whole form."""
     found = [(fr, f) for fr, f in browser_forms(pg) if f.get("vis", True)]
     scored = []
     for fr, f in found:
@@ -391,30 +410,55 @@ def fill_form(pg, values):
         return {"ok": False, "status": "failed", "note": "the form is not there any more"}
     _s, fr, form = max(scored, key=lambda x: x[0])
     root = fr.locator(f'[data-cf-form="{form["idx"]}"]').first
-    filled = 0
+    filled, missing, msg_ok = 0, [], False
     for f in form["fields"]:
         kind = field_kind(f)
-        if not kind:
+        if not kind or not f.get("vis", True):   # hidden fields (honeypots, conditional ones) are left alone
             continue
-        if kind in ("checkbox", "radio", "file", "select"):
+        el = root.locator(f'[data-cf-f="{f["cf"]}"]').first
+        if kind == "select":
             if f.get("req"):
-                return {"ok": False, "status": "needs_human", "note": f"the form needs a {kind} to be chosen"}
+                pick = _pick_option(el)
+                if pick:
+                    try:
+                        el.select_option(label=pick, timeout=3000)
+                        filled += 1
+                        continue
+                    except Exception:
+                        pass
+                if not lenient:
+                    return {"ok": False, "status": "needs_human", "note": "the form needs a drop-down choice (" + (f.get("label") or f.get("name") or "select")[:30].strip() + ")"}
+                missing.append((f.get("label") or f.get("name") or "a drop-down")[:30].strip())
+            continue
+        if kind in ("checkbox", "radio", "file"):
+            if f.get("req"):
+                if not lenient:
+                    return {"ok": False, "status": "needs_human", "note": f"the form needs a {kind} to be chosen"}
+                missing.append(kind)
             continue
         val = _fill_value(kind, values)
         if not val:
             if f.get("req") and kind != "text":
-                return {"ok": False, "status": "needs_human", "note": f"the form needs a {kind} that was not given"}
-            if not f.get("req"):
+                if not lenient:
+                    return {"ok": False, "status": "needs_human", "note": f"the form needs a {kind} that was not given"}
+                missing.append(kind)
+            if not f.get("req") or kind != "text":
                 continue
             val = "n/a"
         try:
-            root.locator(f'[data-cf-f="{f["cf"]}"]').first.fill(val, timeout=4000)
+            el.fill(val, timeout=4000)
             filled += 1
+            if kind == "message":
+                msg_ok = True
         except Exception:
             if f.get("req"):
-                return {"ok": False, "status": "needs_human", "note": f"could not fill the {kind} field"}
+                if not lenient:
+                    return {"ok": False, "status": "needs_human", "note": f"could not fill the {kind} field"}
+                missing.append(kind)
     if not filled:
         return {"ok": False, "status": "failed", "note": "nothing could be filled in"}
+    if lenient and not msg_ok:
+        return {"ok": False, "status": "failed", "note": "the message box could not be filled"}
     btn = None
     for loc in (root.locator("button[type=submit], input[type=submit]"), root.locator("button")):
         for i in range(loc.count()):
@@ -430,7 +474,7 @@ def fill_form(pg, values):
             break
     if btn is None:
         return {"ok": False, "status": "failed", "note": "no send button found"}
-    return {"ok": True, "root": root, "btn": btn, "form": form, "captcha": form.get("cap", "")}
+    return {"ok": True, "root": root, "btn": btn, "form": form, "captcha": form.get("cap", ""), "missing": missing}
 
 
 def _confirmed(pg, before):
@@ -522,7 +566,7 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     pg.wait_for_timeout(2500)
                     _cookie_banner(pg)
                     _dismiss_popups(pg)
-                    r = fill_form(pg, {**values, "message": it.get("message", "")})
+                    r = fill_form(pg, {**values, "message": it.get("message", "")}, lenient=True)
                 except Exception as e:
                     r = {"ok": False, "status": "failed", "note": str(e).splitlines()[0][:100]}
                 if not r["ok"]:
@@ -534,7 +578,7 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     return None
                 if _hook:
                     _hook(pg, it)
-                return {"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False}
+                return {"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False, "manual": bool(r.get("missing")), "missing": r.get("missing") or []}
 
             def top_up():
                 opened = False
@@ -563,6 +607,11 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                                 done = {"status": "sent", "note": "the page confirmed the message was sent"}
                             elif time.time() - t["pressed_at"] > 25:
                                 done = {"status": "unsure", "note": "send was pressed but no confirmation appeared"}
+                        elif t["manual"]:   # something is left for you to choose (a drop-down...): you press send yourself; this only watches for the confirmation
+                            if _confirmed(pg, t["before"]):
+                                done = {"status": "sent", "note": "the page confirmed the message was sent"}
+                            elif time.time() - t["t0"] > wait_minutes * 60:
+                                done = {"status": "later", "note": f"not finished within {wait_minutes} minutes, saved for later"}
                         elif pg.evaluate(SOLVED_JS, None):
                             t["btn"].click(timeout=5000, no_wait_after=True)   # the CAPTCHA was solved by you: press the form's own send button
                             t["pressed"], t["pressed_at"] = True, time.time()

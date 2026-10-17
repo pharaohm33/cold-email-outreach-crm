@@ -1600,6 +1600,21 @@ class H(BaseHTTPRequestHandler):
                 extra = (" " + REMOTE_HINT) if "needs you" in title.lower() else ""
                 sent = phone_notify(title, msg + extra, key=str(body.get("key") or title), every=int(body.get("every") or 600))
             return self._send(200, {"ok": True, "phone": sent, "phone_configured": phone_ready()})
+        if self.path == "/ads/health":   # is the Meta Ad Library answering right now? (one search for a brand that certainly advertises)
+            if STATE["running"]:
+                return self._send(200, {"healthy": None, "busy": True})
+            try:
+                import ad_video
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    b = p.chromium.launch(channel="chrome", headless=True)
+                    try:
+                        ok = ad_video.lookup_healthy(b.new_context(viewport=ad_video.VIEWPORT, locale="en-US").new_page(), lambda m: None)
+                    finally:
+                        b.close()
+                return self._send(200, {"healthy": bool(ok)})
+            except Exception as e:
+                return self._send(200, {"healthy": None, "error": str(e)[:100]})
         if self.path == "/notify/prefs":
             if "clips" in body:
                 prefs = notify_prefs()

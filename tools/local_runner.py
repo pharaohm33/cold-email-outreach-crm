@@ -1124,7 +1124,9 @@ def queue_loop():
                     print("reply scan:", e)
                 n = send_queue.reconcile()
             queue_keep_awake()
-            if STATE["running"] or not email_status()["ready"]:
+            job = STATE.get("job") or ""
+            # the outreach loop keeps the helper busy most of the day (videos, contact forms); due emails must not wait for that. Only a job that writes drafts/sends mail itself blocks the queue.
+            if (STATE["running"] and not (job and "draft" not in job.lower())) or not email_status()["ready"]:
                 queue_alerts(None, n)
                 continue
             r = send_queue.tick(paused=lambda c: bool(pause_state().get(c or "meta")))
@@ -1238,7 +1240,7 @@ class Ports:
         while True:
             with LOCK:
                 if not STATE["running"]:
-                    STATE.update(running=True, log=[f"[runner] {label}"])
+                    STATE.update(running=True, job=label, log=[f"[runner] {label}"])
                     PIPE["stop"] = False
                     threading.Thread(target=fn, args=args, daemon=True).start()
                     break
@@ -1257,6 +1259,7 @@ class Ports:
                 except Exception as e:
                     print("loop line handler:", e)
             if done:
+                STATE.pop("job", None)
                 return True
 
     # --- job bodies (the same functions the page's buttons use)

@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import cold_email, email_finder, personalize, auto_reply, phone_finder, coach_finder, meta_reply, greeting, send_queue
+import cold_email, email_finder, personalize, auto_reply, phone_finder, coach_finder, meta_reply, greeting, send_queue, crm_store, outreach_loop
 SCRIPT = os.getenv("RUNNER_SCRIPT", str(HERE / "google_ai_to_crm.py"))
 PORT = int(os.getenv("RUNNER_PORT", "8765"))
 APP_URL = os.getenv("CLIPPER_URL", "http://127.0.0.1:5001").rstrip("/")
@@ -1056,6 +1056,10 @@ def queue_keep_awake():
     now = time.time()
     soon = [i for i in send_queue.listing() if i["status"] in ("scheduled", "sending") and (i.get("due_at") or 0) - now < 13 * 3600]
     st = awake_status()
+    if LOOP is not None and LOOP.busy_now and not (soon or QUEUE_AWAKE["mine"]):   # the outreach loop is in the middle of a job (videos take a long time): do not let the Mac idle-sleep under it
+        if not st["on"] or st["seconds_left"] < 900:
+            awake_set(True, 120)
+        return
     if soon:
         if not st["on"] or st["seconds_left"] < 1800:
             awake_set(True, 720)
@@ -1120,6 +1124,168 @@ def queue_loop():
             print("send queue error:", e)
 
 
+def do_notify(title, message, key=None, every=600, topic="", mac=True, phone=True):
+    """A Mac banner plus a phone message (Telegram). Returns whether the phone message went out."""
+    title = clean(title or "Clipper CRM", 60)
+    msg = clean(message or "", 160)
+    if topic == "clips" and not clips_alerts():
+        return False
+    if mac and sys.platform == "darwin" and msg:
+        try:
+            subprocess.run(["osascript", "-e", 'display notification "%s" with title "%s" sound name "Glass"' % (msg.replace('"', "'"), ("ClipperCRM: " + title).replace('"', "'"))], capture_output=True, timeout=10)
+        except Exception:
+            pass
+    sent = False
+    if phone and msg:
+        extra = (" " + REMOTE_HINT) if "needs you" in title.lower() else ""
+        sent = phone_notify(title, msg + extra, key=str(key or title), every=int(every or 600))
+    return sent
+
+
+def queue_list_payload():
+    st = email_status()
+    return {"items": send_queue.listing(), "now": time.time(), "in_send_window": st["in_send_window"], "window": st["window"], "capacity_left": st["capacity_left"], "ready": st["ready"]}
+
+
+class Ports:
+    """What the outreach loop (tools/outreach_loop.py) uses to touch the world. Job methods run in a helper job thread (one at a time); the rest answer at once."""
+
+    # --- instant answers
+    def email_status(self):
+        return email_status()
+
+    def greet(self, items):
+        return greeting.resolve(items)
+
+    def preview(self, leads, template, limit):
+        return list(cold_email.plan(leads, template, "preview", int(limit), True, 0))
+
+    def loom_connected(self):
+        import loom_upload
+        return loom_upload.connected()[0]
+
+    def loom_uploads(self):
+        import loom_upload
+        return loom_upload._uploads()
+
+    def halcrus_connected(self):
+        import halcrus_leads
+        return halcrus_leads.connected()[0]
+
+    def queue_list(self):
+        return queue_list_payload()
+
+    def queue_add(self, entries):
+        st = email_status()
+        if not st["ready"]:
+            raise RuntimeError("; ".join(st["problems"]))
+        tpl = (entries[0].get("template") if entries else {}) or {}
+        if not (str(tpl.get("subject") or "").strip() and str(tpl.get("body") or "").strip()) and not (tpl.get("library") or []):
+            raise RuntimeError("no email template, so nothing was scheduled")
+        items = [{"id": str(b.get("id") or "")[:80], "to": str(b.get("to") or (b.get("lead") or {}).get("email") or "")[:200], "company": str(b.get("company") or "")[:80], "lead": b.get("lead") or {},
+                  "template": b.get("template") or tpl, "campaign": str(b.get("campaign") or "meta"), "step": int(b.get("step") or 0)} for b in entries][:60]
+        return send_queue.add(items)
+
+    def queue_cancel(self, id_):
+        return send_queue.cancel(str(id_))
+
+    def cform_replies(self, items):
+        return cform_replies(items)
+
+    def notify(self, title, message, key, every):
+        do_notify(title, message, key, every)
+
+    def ads_health(self):
+        box = {}
+
+        def work():
+            try:
+                import ad_video
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    b = p.chromium.launch(channel="chrome", headless=True)
+                    try:
+                        box["v"] = bool(ad_video.lookup_healthy(b.new_context(viewport=ad_video.VIEWPORT, locale="en-US").new_page(), lambda m: None))
+                    finally:
+                        b.close()
+            except Exception as e:
+                box["err"] = str(e)[:100]
+            finally:
+                STATE["running"] = False
+        if not self.run_job("checking whether the Meta Ad Library answers", work, (), None, 0, lambda: False):
+            return None    # the helper is busy: unsure
+        return box.get("v")
+
+    # --- the one-job-at-a-time runner
+    def run_job(self, label, fn, args, on_line, wait, should_abort):
+        """Starts fn(*args) as THE helper job (waiting up to `wait` seconds for the helper to be free), feeds its output lines to on_line, returns True when it finished, False if it never started."""
+        t0 = time.time()
+        while True:
+            with LOCK:
+                if not STATE["running"]:
+                    STATE.update(running=True, log=[f"[runner] {label}"])
+                    PIPE["stop"] = False
+                    threading.Thread(target=fn, args=args, daemon=True).start()
+                    break
+            if should_abort() or time.time() - t0 >= wait:
+                return False
+            time.sleep(3)
+        since = 0
+        while True:
+            time.sleep(0.5)
+            done = not STATE["running"]
+            lines = STATE["log"][since:]
+            since += len(lines)
+            for ln in lines:
+                try:
+                    on_line and on_line(ln)
+                except Exception as e:
+                    print("loop line handler:", e)
+            if done:
+                return True
+
+    # --- job bodies (the same functions the page's buttons use)
+    def loom_upload(self, items, show, keep_local):
+        run_loom_upload([{k: str(b.get(k) or "")[:300] for k in ("id", "file", "title", "comment")} for b in items][:5], bool(show), bool(keep_local))
+
+    def ad_video(self, items, voice, product, host, narrator):
+        run_ad_video([{k: str(b.get(k) or "")[:300] for k in ("id", "company", "email", "web", "first", "business")} for b in items][:5], str(voice or "")[:60], str(product or "")[:60], None,
+                     "drive" if host == "drive" else "loom", (str(narrator)[:40] if narrator is not None else None))
+
+    def halcrus_leads(self, want, tier, emails, companies):
+        run_halcrus_leads(max(1, min(40, int(want))), [str(x)[:200] for x in emails][:20000], [str(x)[:120] for x in companies][:20000], tier if tier in ("Hot", "Warm", "Nurture", "All") else "Hot")
+
+    def email_check(self, items, ai, jitbit):
+        import tempfile
+        fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        json.dump([{"id": str(b.get("id") or "")[:80], "email": str(b.get("email") or "")[:200], "company": str(b.get("company") or "")[:100], "web": str(b.get("web") or "")[:200]} for b in items][:40], fh)
+        fh.close()
+        run_email_check(fh.name, bool(ai), bool(jitbit))
+
+    def email_drafts(self, leads, template, limit):
+        st = email_status()
+        if not st["ready"]:
+            log("[runner] email is not set up: " + "; ".join(st["problems"]))
+            STATE["running"] = False
+            return
+        run_email(leads, template, "drafts", min(60, int(limit)), False, 0, "meta")
+
+    def cform_find(self, items):
+        run_cform_find([{"id": str(b.get("id") or "")[:80], "domain": str(b.get("domain") or "")[:200], "web": str(b.get("web") or "")[:200]} for b in items][:20])
+
+    def cform_send(self, items, values, limit):
+        run_cform_send([{"id": str(b.get("id") or "")[:80], "url": str(b.get("url") or "")[:500], "message": str(b.get("message") or "")[:3000], "subject": str(b.get("subject") or "")[:150]} for b in items
+                        if str(b.get("url") or "").startswith("http")][:25], {"values": values, "limit": limit})
+
+    def cform_batch(self, items, values):
+        run_cform_batch([{"id": str(b.get("id") or "")[:80], "url": str(b.get("url") or "")[:500], "message": str(b.get("message") or "")[:3000], "subject": str(b.get("subject") or "")[:150]} for b in items
+                         if str(b.get("url") or "").startswith("http")][:250], {"values": values})
+
+
+STORE = None
+LOOP = None
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -1169,6 +1335,10 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
             return self._send(404, {"error": "no such screenshot"})
+        elif u.path == "/loop/status":
+            if LOOP is None:
+                return self._send(503, {"error": "the outreach loop is off"})
+            self._send(200, LOOP.status())
         elif u.path == "/awake":
             self._send(200, awake_status())
         elif u.path == "/clipper/templates":
@@ -1192,6 +1362,34 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._send(400, {"error": "bad json"})
+        if self.path == "/crm/sync":     # the page hands over its changes and gets everything that changed here (see tools/crm_store.py)
+            if STORE is None:
+                return self._send(503, {"error": "the helper's CRM store is off"})
+            res = None
+            for _ in range(4):
+                try:
+                    res = STORE.sync(body)
+                    break
+                except RuntimeError:     # the loop changed a lead while it was being copied: try again
+                    time.sleep(0.05)
+            if res is None:
+                return self._send(503, {"error": "busy, try again"})
+            res["loop"] = LOOP.status() if LOOP is not None else None
+            return self._send(200, res)
+        if self.path == "/loop/status":
+            if LOOP is None:
+                return self._send(503, {"error": "the outreach loop is off"})
+            return self._send(200, LOOP.status(light=bool(body.get("light"))))
+        if self.path == "/loop/request":   # the page's buttons: the loop does the work itself, one thing at a time
+            if LOOP is None:
+                return self._send(503, {"error": "the outreach loop is off"})
+            kind = str(body.get("kind") or "")
+            if kind not in ("run", "pipeline", "forms_find", "forms_send", "replies", "captcha", "send_ready", "keep"):
+                return self._send(400, {"error": "unknown request"})
+            if kind in ("run", "forms_send", "captcha", "send_ready") and body.get("confirm") is not True:
+                return self._send(400, {"error": "needs confirm: true"})
+            LOOP.request(kind, count=body.get("count"), auto=bool(body.get("auto")))
+            return self._send(200, {"ok": True})
         if self.path == "/campaign/pause":
             c = str(body.get("campaign") or "clips")
             data = pause_state()
@@ -1207,6 +1405,8 @@ class H(BaseHTTPRequestHandler):
             if p and STATE["running"]:
                 p.terminate()
             PIPE["stop"] = True
+            if LOOP is not None:
+                LOOP.abort = True       # the round the loop is in ends after the current job
             try:
                 import loom_upload
                 loom_upload.CANCEL.set()   # in-process Loom upload: it checks this between its waits
@@ -1588,17 +1788,9 @@ class H(BaseHTTPRequestHandler):
             rows = [{k: e.get(k) for k in ("id", "to", "from", "ts", "step", "subject", "variant", "provider")} for e in cold_email.sent_entries() if e.get("ts", 0) > cutoff and cold_email.campaign_of(e) == camp]
             return self._send(200, {"sent": rows})
         if self.path == "/notify":
-            title = clean(body.get("title") or "Clipper CRM", 60)
-            msg = clean(body.get("message") or "", 160)
             if str(body.get("topic") or "") == "clips" and not clips_alerts():
                 return self._send(200, {"ok": True, "phone": False, "phone_configured": phone_ready(), "muted": "clips alerts are off"})
-            if sys.platform == "darwin" and msg:
-                subprocess.run(["osascript", "-e", 'display notification "%s" with title "%s" sound name "Glass"' % (msg.replace('"', "'"), ("ClipperCRM: " + title).replace('"', "'"))],
-                               capture_output=True, timeout=10)
-            sent = False
-            if body.get("phone", True) and msg:
-                extra = (" " + REMOTE_HINT) if "needs you" in title.lower() else ""
-                sent = phone_notify(title, msg + extra, key=str(body.get("key") or title), every=int(body.get("every") or 600))
+            sent = do_notify(body.get("title"), body.get("message"), body.get("key"), body.get("every") or 600, phone=bool(body.get("phone", True)))
             return self._send(200, {"ok": True, "phone": sent, "phone_configured": phone_ready()})
         if self.path == "/ads/health":   # is the Meta Ad Library answering right now? (one search for a brand that certainly advertises)
             if STATE["running"]:
@@ -1717,6 +1909,26 @@ if __name__ == "__main__":
     if os.getenv("KEEP_CLIPPER_ALIVE", "1") != "0":
         threading.Thread(target=keep_clipper_awake, daemon=True).start()
     load_env()
+    STORE = crm_store.get_store()
+    if os.getenv("OUTREACH_LOOP", "1") != "0":
+        if os.getenv("LOOP_STUBS") == "1":      # tests: never touch Loom, HALCRUS, forms or email for real
+            import loop_stubs
+            _ports = loop_stubs.StubPorts()
+        else:
+            _ports = Ports()
+        LOOP = outreach_loop.Loop(STORE, _ports, tick=int(os.getenv("LOOP_TICK", "15")), start_delay=int(os.getenv("LOOP_START_DELAY", "30")))
+        threading.Thread(target=LOOP.run_forever, daemon=True).start()
+    threading.Thread(target=STORE.flusher, daemon=True).start()
+
+    def _bye(*a):       # launchd stops the helper with SIGTERM: keep the last couple of seconds of changes
+        try:
+            STORE.flush(True)
+            if LOOP is not None:
+                LOOP.save_state()
+        finally:
+            os._exit(0)
+    import signal
+    signal.signal(signal.SIGTERM, _bye)
     threading.Thread(target=queue_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     print(f"Clipper runner listening on http://127.0.0.1:{PORT}  (leave this window open, Ctrl+C to stop)")
@@ -1726,3 +1938,4 @@ if __name__ == "__main__":
         srv.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
+        STORE.flush(True)

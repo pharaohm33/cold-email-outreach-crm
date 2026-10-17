@@ -33,3 +33,11 @@ tools/loom_uploads.json
 tools/contact_form_debug/
 tools/contact_form_log.jsonl
 tools/notify_prefs.json
+
+# the helper owns the lead store and the outreach loop: its data and memory (lead data, private)
+tools/crm_state.json
+tools/crm_state.tmp
+tools/loop_state.json
+tools/loop_state.tmp
+tools/stub_control.json
+tools/stub_log.jsonl

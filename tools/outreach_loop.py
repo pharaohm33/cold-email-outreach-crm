@@ -450,6 +450,12 @@ class Loop:
             self.loom_connected = None
         return self.loom_connected
 
+    def meta_connected(self):
+        try:
+            return bool(self.ports.meta_connected())
+        except Exception:
+            return False
+
     def hc_status(self):
         try:
             self.hc_connected = bool(self.ports.halcrus_connected())
@@ -1216,6 +1222,8 @@ class Loop:
                 self.alert("Outreach stopped", "The automatic top-up stopped: " + str(rr["fatal"])[:140], "fatal", 6 * 3600)
                 return self.later(1, "Stopped: " + str(rr["fatal"])[:140])
             if rr.get("adBlocked"):
+                if not self.meta_connected():
+                    self.alert("Meta Ad Library needs you", "Meta is not answering Ad Library searches from this Mac (it says \"No ads match\" even for Nike). Open the CRM, Meta Ads tab, step 1, and press Connect Meta to log in to Facebook once; until then it retries every hour.", "meta-blocked", 12 * 3600)
                 return self.later(1, "The Meta Ad Library is not answering properly (likely rate limiting). Trying again in 1 hour.")
             stock1 = self.stock_now()
             if stock1 <= stock0 and not rr.get("made"):
@@ -1392,7 +1400,7 @@ class Loop:
                 stock = {"now": 0, "goal": 0, "keepDays": 2, "dailyCap": 0}
             out = {"ok": True, "now": now_ms(), "alive_at": int(self.alive_at * 1000), "started_at": int(self.t_started * 1000), "busy": self.busy_now, "auto": self.st.get("auto"), "beat": self.st.get("beat"),
                    "after": self.st.get("after"), "run": self.st.get("run"), "pipeMsg": self.st.get("pipeMsg"), "cfMsg": self.st.get("cfMsg"), "stock": stock,
-                   "loom": self.loom_connected, "halcrus": self.hc_connected, "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
+                   "loom": self.loom_connected, "halcrus": self.hc_connected, "meta": self.meta_connected(), "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
                    "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings)}
             if not light:
                 out["routes"], out["t1"] = self.routes()

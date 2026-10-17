@@ -1025,6 +1025,16 @@ def run_halcrus_login():
         STATE["running"] = False
 
 
+def run_meta_login():
+    """Opens a visible Chrome window (the helper's own Meta profile) so you can log in to Facebook once; the Ad Library lookups then run in that profile."""
+    try:
+        import meta_session
+        meta_session.login(timeout=900, log=log)
+        log("[runner] Meta login finished.")
+    finally:
+        STATE["running"] = False
+
+
 def run_halcrus_leads(want, emails, companies, tier):
     """Reads new leads from the HALCRUS portal and streams 'HALCRUS {json}' per lead, then 'HALCRUSEND {json}'."""
     try:
@@ -1169,6 +1179,10 @@ class Ports:
         import loom_upload
         return loom_upload._uploads()
 
+    def meta_connected(self):
+        import meta_session
+        return meta_session.connected()[0]
+
     def halcrus_connected(self):
         import halcrus_leads
         return halcrus_leads.connected()[0]
@@ -1204,11 +1218,11 @@ class Ports:
                 import ad_video
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as p:
-                    b = p.chromium.launch(channel="chrome", headless=True)
+                    ctx, closer = ad_video.open_context(p)
                     try:
-                        box["v"] = bool(ad_video.lookup_healthy(b.new_context(viewport=ad_video.VIEWPORT, locale="en-US").new_page(), lambda m: None))
+                        box["v"] = bool(ad_video.lookup_healthy(ctx.new_page(), lambda m: None))
                     finally:
-                        b.close()
+                        closer()
             except Exception as e:
                 box["err"] = str(e)[:100]
             finally:
@@ -1633,6 +1647,17 @@ class H(BaseHTTPRequestHandler):
             import halcrus_leads
             ok, at = halcrus_leads.connected()
             return self._send(200, {"connected": ok, "at": at})
+        if self.path == "/meta/status":
+            import meta_session
+            ok, at = meta_session.connected()
+            return self._send(200, {"connected": ok, "at": at})
+        if self.path == "/meta/login":
+            with LOCK:
+                if STATE["running"]:
+                    return self._send(409, {"error": "a run is already in progress"})
+                STATE.update(running=True, log=["[runner] opening the Meta Ad Library so you can log in to Facebook (a Chrome window will appear)"])
+                threading.Thread(target=run_meta_login, daemon=True).start()
+            return self._send(200, {"ok": True})
         if self.path == "/halcrus/login":
             with LOCK:
                 if STATE["running"]:
@@ -1800,11 +1825,11 @@ class H(BaseHTTPRequestHandler):
                 import ad_video
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as p:
-                    b = p.chromium.launch(channel="chrome", headless=True)
+                    ctx, closer = ad_video.open_context(p)
                     try:
-                        ok = ad_video.lookup_healthy(b.new_context(viewport=ad_video.VIEWPORT, locale="en-US").new_page(), lambda m: None)
+                        ok = ad_video.lookup_healthy(ctx.new_page(), lambda m: None)
                     finally:
-                        b.close()
+                        closer()
                 return self._send(200, {"healthy": bool(ok)})
             except Exception as e:
                 return self._send(200, {"healthy": None, "error": str(e)[:100]})

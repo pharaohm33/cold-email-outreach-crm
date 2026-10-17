@@ -82,6 +82,9 @@ class StubPorts:
     def loom_uploads(self):
         return dict(self.uploaded)
 
+    def meta_connected(self):
+        return bool(control().get("meta_connected", False))
+
     def halcrus_connected(self):
         return control()["halcrus_connected"]
 

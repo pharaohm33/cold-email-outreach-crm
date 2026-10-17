@@ -41,3 +41,5 @@ tools/loop_state.json
 tools/loop_state.tmp
 tools/stub_control.json
 tools/stub_log.jsonl
+tools/.meta_profile/
+tools/meta_session.json

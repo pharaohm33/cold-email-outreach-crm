@@ -57,6 +57,19 @@ def norm(s):
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
 
 
+def open_context(p):
+    """(context, closer): the logged-in Meta profile when "Connect Meta" was done (Meta answers a logged-in browser far more reliably), else a plain headless Chrome."""
+    try:
+        import meta_session
+        if meta_session.connected()[0]:
+            ctx = meta_session.context(p, False)
+            return ctx, ctx.close
+    except Exception:
+        pass
+    browser = p.chromium.launch(channel="chrome", headless=True)
+    return browser.new_context(viewport=VIEWPORT, locale="en-US"), browser.close
+
+
 def brand_domain(email, web):
     """The domain whose ads we expect to see: the email's, or the website's when the email is a free mailbox."""
     d = str(email or "").split("@")[-1].lower().strip()
@@ -834,9 +847,8 @@ def make(item, voice=DEFAULT_VOICE, sender="Emmanuel", product="AI Ads Optimizat
         narrator = sender if voice_gender(voice) == "m" else ""
     log(f"[{company}] brand domain {domain}; searching the Ad Library")
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=True)
+        ctx, closer = open_context(p)
         try:
-            ctx = browser.new_context(viewport=VIEWPORT, locale="en-US")
             pg = ctx.new_page()
             chosen, rejected, any_cands, seen = None, [], False, set()
             for country in ("US", "ALL"):  # the US Ad Library first; all countries when nothing there is this brand, for country domains only (a UK or Canadian shop)
@@ -889,7 +901,7 @@ def make(item, voice=DEFAULT_VOICE, sender="Emmanuel", product="AI Ads Optimizat
                 pass
             return {"ok": True, "display_name": display, "file": str(mp4), "facts": chosen, "script": script, "seconds": round(secs), "link_from": round(start, 1), "voice": used, "ad_clicks": clicks}
         finally:
-            browser.close()
+            closer()
 
 
 if __name__ == "__main__":

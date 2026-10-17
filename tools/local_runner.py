@@ -1463,8 +1463,8 @@ class H(BaseHTTPRequestHandler):
                 if body.get("confirm") is not True:
                     return self._send(400, {"error": "needs confirm: true"})
                 items = [{"id": str(b.get("id") or "")[:80], "url": str(b.get("url") or "")[:500], "message": str(b.get("message") or "")[:3000]} for b in raw
-                         if str(b.get("url") or "").startswith("http")][:(25 if kind == "send" else 20)]
-                target, args, label = (run_cform_send if kind == "send" else run_cform_batch), (items, body), (f"sending {len(items)} message(s) through contact forms" if kind == "send" else f"{len(items)} CAPTCHA form(s) open for you")
+                         if str(b.get("url") or "").startswith("http")][:(25 if kind == "send" else 250)]
+                target, args, label = (run_cform_send if kind == "send" else run_cform_batch), (items, body), (f"sending {len(items)} message(s) through contact forms" if kind == "send" else f"{len(items)} CAPTCHA form(s) in a window for you, 8 at a time")
             if not items:
                 return self._send(400, {"error": "nothing to do"})
             with LOCK:

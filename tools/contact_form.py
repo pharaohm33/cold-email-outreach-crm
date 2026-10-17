@@ -499,23 +499,23 @@ def submit(url, values, confirm=False, show=False, log=print):
             b.close()
 
 
-def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: False, _hook=None, _headless=False):
-    """For forms that have a CAPTCHA. Opens a VISIBLE Chrome window with one tab per form, every form already filled in. YOU solve the CAPTCHA in each tab; the moment it is
-    solved the send button is pressed, the result is reported and the next tab comes to the front. A tab you do not get to within `wait_minutes` (counted from when it opened)
-    is closed and reported as 'later', so the lead stays saved for another go. The CAPTCHA itself is never touched by this code.
+def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: False, _hook=None, _headless=False, window=8):
+    """For forms that have a CAPTCHA. Opens a VISIBLE Chrome window and keeps `window` tabs open at a time, every form already filled in (a rolling window, so one press can
+    cover hundreds of forms without hundreds of tabs). YOU solve the CAPTCHA in a tab; the moment it is solved the send button is pressed, the result is reported, the tab closes
+    and the next form opens and is filled in. A tab you do not get to within `wait_minutes` (counted from when it opened) is closed and reported as 'later', so the lead stays saved.
+    The CAPTCHA itself is never touched by this code.
     items: [{id, url, message}], values: {name, email, phone, subject, company, website}. on_result gets {id, status, note}."""
     from playwright.sync_api import sync_playwright
     if not items:
         return
     DEBUG.mkdir(exist_ok=True)
+    pending, tabs = list(items), []   # tabs: {id, pg, t0, before, btn, pressed}
     with sync_playwright() as p:
         b = _ctx(p, not _headless)
         try:
             ctx = b.new_context(viewport={"width": 1280, "height": 900}, user_agent=UA, locale="en-US")
-            tabs = []  # {id, pg, t0, before, btn, pressed}
-            for it in items:
-                if stop():
-                    break
+
+            def open_one(it):
                 pg = ctx.new_page()
                 try:
                     pg.goto(it["url"], wait_until="domcontentloaded", timeout=30000)
@@ -527,17 +527,30 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     r = {"ok": False, "status": "failed", "note": str(e).splitlines()[0][:100]}
                 if not r["ok"]:
                     on_result({"id": it["id"], "status": r["status"], "note": r["note"]})
-                    pg.close()
-                    continue
+                    try:
+                        pg.close()
+                    except Exception:
+                        pass
+                    return None
                 if _hook:
                     _hook(pg, it)
-                tabs.append({"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False})
-            if tabs:
-                try:
-                    tabs[0]["pg"].bring_to_front()
-                except Exception:
-                    pass
-            while tabs and not stop():
+                return {"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False}
+
+            def top_up():
+                opened = False
+                while pending and len(tabs) < window and not stop():
+                    t = open_one(pending.pop(0))
+                    if t:
+                        tabs.append(t)
+                        opened = True
+                if tabs and opened and len(tabs) == 1:
+                    try:
+                        tabs[0]["pg"].bring_to_front()
+                    except Exception:
+                        pass
+
+            top_up()
+            while (tabs or pending) and not stop():
                 time.sleep(1.2)
                 for t in list(tabs):
                     pg = t["pg"]
@@ -571,8 +584,11 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                                 tabs[0]["pg"].bring_to_front()
                             except Exception:
                                 pass
+                top_up()
             for t in tabs:  # stopped
                 on_result({"id": t["id"], "status": "later", "note": "stopped"})
+            for it in pending:
+                on_result({"id": it["id"], "status": "later", "note": "stopped"})
         finally:
             b.close()
 

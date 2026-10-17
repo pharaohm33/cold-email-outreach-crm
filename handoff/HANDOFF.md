@@ -111,6 +111,9 @@ By hand, once per computer: in the CRM press "Connect Loom" and log in (the help
 - Forms outside sending hours: step 4 button "Allow forms outside sending hours: ON/OFF" (S.settings.cformAnyTime). The headless sender never opens a window; only the CAPTCHA batch is visible.
 - Loom upload: if no new video shows up in the library after about 2 minutes the upload is tried once more (the Icecartel upload had silently not started twice); rename waits longer (Loom is still processing right after an upload).
 
+## Scaling CAPTCHA forms without solving them (Oct 17)
+- Decision: this code does NOT solve or bypass CAPTCHAs (not an option, even on request). Scale comes from: the batch window now takes up to 20 pre-filled forms per run (page slice and /cform/batch cap), a CAPTCHA form not solved within S.settings.cformFallbackHours (default 48, 0 = never; field in step 4) falls back to the email route (cformRoute 'email'), and a phone alert ('CAPTCHA forms waiting', every 6 h) fires when 10 or more are waiting. Invisible reCAPTCHA v3 forms (no challenge shown) are still filled and sent normally.
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

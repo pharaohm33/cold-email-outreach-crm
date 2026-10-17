@@ -76,6 +76,7 @@ class Loop:
         self.start_delay = start_delay
         self.lock = threading.RLock()
         self.requests = []
+        self.wake = threading.Event()   # a button press wakes the loop at once instead of at the next tick
         self.abort = False
         self.busy_now = ""          # what the loop is doing this second
         self.es = None
@@ -326,6 +327,11 @@ class Loop:
         if st == 1 and d >= 7 * DAY - 36e5:
             return 2
         return 0
+
+    def pipeline_backlog(self):
+        """Leads whose video is made (or on Loom) but whose draft / scheduled send / form message does not exist yet: they will become stock."""
+        return len([l for l in self.leads if l.get("videoAuto") and l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("removedAt") and not l.get("draftedAt")
+                    and not self.queued(l) and self.cform_route(l) not in ("form-done", "human", "form-auto")])
 
     def send_auto(self):
         return self.g.get("sendMode") == "auto"
@@ -598,6 +604,9 @@ class Loop:
             return
         n = len(self.loom_to_send_base(True))
         x = int(max(1, jsnum(self.g.get("notifyReady"), 10)))
+        if self.st.get("ready_x") != x:      # the person changed "notify me when N are ready": count again from zero
+            self.st["ready_x"] = x
+            self.st["readyNotified"] = 0
         k = n // x
         if n >= x and not self.load_es(True).get("in_send_window"):
             return
@@ -1121,7 +1130,10 @@ class Loop:
                 say(f"{ok_n} of {len(batch)} made" + (f"; skipped {', '.join(str(l.get('company')) + ' (' + str(l['video'].get('reason') or 'failed') + ')' for l in bad)}" if bad else "") + ".")
             look = len([l for l in self.leads if l.get("videoAuto") and not l.get("videoApproved") and not l.get("emailedAt") and not l.get("loomLink")])
             say(f"Videos ready: {made}." + (f" {look} need a human look before they go on." if look else "") + " Uploading, saving drafts and scheduling…")
-            self.pipeline(True)
+            for _ in range(6):      # a pass uploads 3 videos: carry on until the round's videos are all through (or Loom needs a login)
+                self.pipeline(True)
+                if not self.loom_to_upload() or self.loom_connected is False or self.abort:
+                    break
             self.queue_sync()
             act = [x for x in ((getattr(self, "queue_cache", None) or {}).get("items") or []) if x.get("status") == "scheduled"]
             nx = min((x["due_at"] for x in act), default=0)
@@ -1184,9 +1196,10 @@ class Loop:
                     self.queue_sync()
             look = len([l for l in self.leads if l.get("videoAuto") and not l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("loomLink") and isinstance(l.get("video"), dict) and l["video"].get("ok")])
             stock0 = self.stock_now()
-            need = self.stock_goal() - stock0
+            coming = self.pipeline_backlog()     # videos made or on Loom that the pipeline is still turning into drafts, scheduled emails or form messages
+            need = self.stock_goal() - stock0 - coming
             if need <= 0:
-                return self.why(f"Goal reached: {stock0} emails saved ({self.keep_days()} day{'' if self.keep_days() == 1 else 's'}). It starts again when it drops below {self.stock_goal()}.")
+                return self.why(f"Goal reached: {stock0} emails saved{f' and {coming} on their way' if coming else ''} ({self.keep_days()} day{'' if self.keep_days() == 1 else 's'}). It starts again when it drops below {self.stock_goal()}.")
             if look >= 5:
                 self.alert("Videos need a look", f"{look} videos did not pass the automatic check and are waiting for you in the CRM (Meta Ads tab). Nothing new is being made until you review them.", "look")
                 return self.later(1, f"{look} videos need your look (step 3). Nothing new is made until you approve or remove them.")
@@ -1205,12 +1218,12 @@ class Loop:
             if rr.get("adBlocked"):
                 return self.later(1, "The Meta Ad Library is not answering properly (likely rate limiting). Trying again in 1 hour.")
             stock1 = self.stock_now()
-            if stock1 <= stock0:
+            if stock1 <= stock0 and not rr.get("made"):
                 if self.hc_connected is False:
                     self.alert("HALCRUS needs you", "HALCRUS is not connected, so no new leads can be found. Open the CRM, Meta Ads tab, and press Connect HALCRUS.", "hc-login", 6 * 3600)
                 self.later(3, ("No usable leads left: HALCRUS had nothing new" + (" (it is not connected: press Connect HALCRUS)" if self.hc_connected is False else "") + ". Trying again in 3 hours.") if rr.get("noLeads")
                            else f"That round saved no new emails ({len(rr.get('rejected') or [])} leads were skipped, {rr.get('made') or 0} videos made). Trying again in 3 hours.")
-            elif stock1 < self.stock_goal():
+            elif stock1 + self.pipeline_backlog() < self.stock_goal():
                 self.why(f"{stock1} of {self.stock_goal()} saved. Starting the next round.")
                 self.st["keep_at"] = time.time() + 20   # progress was made and there is still room: go again right away
             else:
@@ -1226,6 +1239,7 @@ class Loop:
     def request(self, kind, **kw):
         with self.lock:
             self.requests.append({"kind": kind, "at": time.time(), **kw})
+        self.wake.set()
         return True
 
     def send_ready_now(self):
@@ -1291,6 +1305,10 @@ class Loop:
         now = time.time()
         if not self.store.settings:
             return
+        try:
+            self.queue_sync()       # what the send queue did (sent, bounced, cancelled) reaches the leads within a tick, page open or not
+        except Exception as e:
+            self.last_error = "queue: " + str(e)[:120]
         if self.g.get("loomAuto") and now >= self.st.get("pipe_at", 0):
             self.st["pipe_at"] = now + 120
             try:
@@ -1322,16 +1340,20 @@ class Loop:
                 self.last_error = str(e)[:160]
                 if self.errors_in_row >= 3:
                     self.alert("Outreach loop failing", "The helper's outreach loop keeps failing: " + self.last_error + " Check ~/Library/Logs/clipper/helper.log.", "loop-fail", 6 * 3600)
-            self.sleep(self.tick_s)
+            self.wake.wait(self.tick_s)
+            self.wake.clear()
 
     # ------------------------------------------------------------------ what the page shows
     def routes(self):
-        out = {}
+        out, t1 = {}, {}
         for l in self.leads:
             r = self.cform_route(l)
             if r != "wait":
                 out[str(l["id"])] = r
-        return out
+            reason = self.t1_reason(l)
+            if reason:
+                t1[str(l["id"])] = reason
+        return out, t1
 
     def channel_stats(self):
         leads = [l for l in self.leads if self.strat_of(l) == "loom" or l.get("cformSent")]
@@ -1364,9 +1386,9 @@ class Loop:
             out = {"ok": True, "now": now_ms(), "alive_at": int(self.alive_at * 1000), "started_at": int(self.t_started * 1000), "busy": self.busy_now, "auto": self.st.get("auto"), "beat": self.st.get("beat"),
                    "after": self.st.get("after"), "run": self.st.get("run"), "pipeMsg": self.st.get("pipeMsg"), "cfMsg": self.st.get("cfMsg"), "stock": stock,
                    "loom": self.loom_connected, "halcrus": self.hc_connected, "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
-                   "store": self.store.snapshot(), "queued_requests": len(self.requests)}
+                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings)}
             if not light:
-                out["routes"] = self.routes()
+                out["routes"], out["t1"] = self.routes()
                 out["stats"] = self.channel_stats()
                 out["counts"] = {"toUpload": len(self.loom_to_upload()), "toDraft": len(self.loom_to_draft()), "toSend": len(self.loom_to_send_base(True)), "waitingHuman": self.waiting_human()}
             return out

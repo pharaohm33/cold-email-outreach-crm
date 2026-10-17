@@ -1074,13 +1074,14 @@ def queue_alerts(r=None, bounced=0):
     """Phone alerts for what needs a person: a send that failed for good, a skip, bounces, and one short summary at the end of each sending day."""
     if r and r.get("status") == "failed":
         phone_notify("A send failed", f"{r.get('id')}: {str(r.get('why') or '')[:120]}. It is in the Scheduled sends table; Reschedule it when fixed.", key="send-fail-" + str(r.get("id")), every=86400)
-    if r and r.get("status") == "skipped":
+    prefs = notify_prefs()      # the phone only buzzes when you must act; these are informational, so they are opt-in (tools/notify_prefs.json: skips, bounces, summary)
+    if r and r.get("status") == "skipped" and prefs.get("skips"):
         phone_notify("A send was skipped", f"{r.get('id')}: {str(r.get('why') or '')[:120]}", key="send-skip-" + str(r.get("id")), every=86400)
-    if bounced:
+    if bounced and prefs.get("bounces"):
         phone_notify("Bounces", f"{bounced} email(s) bounced. They will not be retried.", key="bounce-" + time.strftime("%Y%m%d%H"), every=3600)
     cfg = cold_email.load_config()
     now = datetime.now()
-    if now.hour >= int((cfg.get("send_window") or {}).get("end_hour", 17)):
+    if prefs.get("summary") and now.hour >= int((cfg.get("send_window") or {}).get("end_hour", 17)):
         items = send_queue.listing()
         today = now.date()
         sent = [i for i in items if i["status"] == "sent" and i.get("sent_at") and datetime.fromtimestamp(i["sent_at"]).date() == today]
@@ -1173,7 +1174,7 @@ class Ports:
         return halcrus_leads.connected()[0]
 
     def queue_list(self):
-        return queue_list_payload()
+        return {"items": send_queue.listing()}
 
     def queue_add(self, entries):
         st = email_status()
@@ -1808,11 +1809,13 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(200, {"healthy": None, "error": str(e)[:100]})
         if self.path == "/notify/prefs":
-            if "clips" in body:
-                prefs = notify_prefs()
-                prefs["clips"] = bool(body.get("clips"))
+            prefs = notify_prefs()
+            for k in ("clips", "skips", "bounces", "summary"):
+                if k in body:
+                    prefs[k] = bool(body.get(k))
+            if any(k in body for k in ("clips", "skips", "bounces", "summary")):
                 NOTIFY_PREFS.write_text(json.dumps(prefs), encoding="utf-8")
-            return self._send(200, {"ok": True, "clips": clips_alerts()})
+            return self._send(200, {"ok": True, "clips": clips_alerts(), "skips": bool(prefs.get("skips")), "bounces": bool(prefs.get("bounces")), "summary": bool(prefs.get("summary"))})
         if self.path == "/email/stats":
             return self._send(200, cold_email.stats())
         if self.path == "/pipeline/stop":
@@ -1929,7 +1932,8 @@ if __name__ == "__main__":
             os._exit(0)
     import signal
     signal.signal(signal.SIGTERM, _bye)
-    threading.Thread(target=queue_loop, daemon=True).start()
+    if os.getenv("QUEUE_LOOP", "1") != "0":     # tests run a second helper that must never send from the real queue
+        threading.Thread(target=queue_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
     print(f"Clipper runner listening on http://127.0.0.1:{PORT}  (leave this window open, Ctrl+C to stop)")
     if not (os.getenv("CRM_SYNC_URL") and os.getenv("CRM_SYNC_PASSWORD")):

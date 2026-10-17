@@ -182,8 +182,13 @@ class Store:
                 for k in p.get("del") or []:
                     if k != "id":
                         cur.pop(k, None)
-            for gid in body.get("gone") or []:
-                gid = str(gid)
+            gone_in = [str(x) for x in (body.get("gone") or [])]
+            if len(gone_in) > max(20, len(self.leads) // 4):     # a page that lost its data must not wipe the real store
+                gone_in = []
+                refused = len(body.get("gone") or [])
+            else:
+                refused = 0
+            for gid in gone_in:
                 if gid in self.leads:
                     del self.leads[gid]
                 if gid not in gone_ids:
@@ -214,7 +219,7 @@ class Store:
             sets = {k: copy.deepcopy(v) for k, v in self.settings.items() if full or self.set_rev.get(k, 0) > cr}
             dels = [k for k, r in self.set_rev.items() if k not in self.settings and r > cr and not full]
             gone = [g["id"] for g in self.gone if g["rev"] > cr] if not full else [g["id"] for g in self.gone]
-            return {"ok": True, "rev": self.rev, "leads": leads, "settings": {"set": sets, "del": dels}, "gone": gone, "count": len(self.leads), "full": full}
+            return {"ok": True, "refused_gone": refused, "rev": self.rev, "leads": leads, "settings": {"set": sets, "del": dels}, "gone": gone, "count": len(self.leads), "full": full}
 
     def snapshot(self):
         with self.lock:

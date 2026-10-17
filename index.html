@@ -90,14 +90,81 @@ function adoptNewer(){try{const cur=JSON.parse(localStorage.getItem('clipperCRM'
  const next=Object.assign({},DEF,cur);next.leads=nl;if(nad)next.adLeads=nad;next.adGone=[...gone];
  Object.keys(sett).forEach(k=>{if(!(k in (cur.settings||{}))&&!(k in DEF.settings))delete sett[k]});Object.assign(sett,DEF.settings,cur.settings);next.settings=sett;
  Object.keys(S).forEach(k=>delete S[k]);Object.assign(S,next);return true}}catch(e){}return false}
-function save(){adoptNewer();S._rev=(S._rev||0)+1;localStorage.setItem('clipperCRM',JSON.stringify(S));clearTimeout(syncT);if(S.settings.syncUrl&&S.settings.syncPw)syncT=setTimeout(()=>syncCall('push'),2500)}
+function save(quiet){adoptNewer();S._rev=(S._rev||0)+1;localStorage.setItem('clipperCRM',JSON.stringify(S));clearTimeout(syncT);if(S.settings.syncUrl&&S.settings.syncPw)syncT=setTimeout(()=>syncCall('push'),2500);if(!quiet){try{hsSoon(400)}catch(e){}}}
 async function syncCall(action){const g=S.settings;if(!g.syncUrl||!g.syncPw){setSync('Sync not set up');return null}
  setSync(action=='push'?'Syncing…':'Pulling…');
  const st={leads:S.leads,payments:S.payments,team:S.team,clients:S.clients,retainers:S.retainers||[],settings:{goal:g.goal,daily:g.daily}};
  try{const r=await fetch(g.syncUrl,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({secret:g.syncPw,action,state:action=='push'?st:undefined})});
   const j=await r.json();if(!j.ok)throw new Error(j.error);setSync(action=='push'?'Synced ✓ '+new Date().toLocaleTimeString():'Pulled ✓');return j}
  catch(e){setSync('Sync failed: '+e.message);return null}}
-window.addEventListener('storage',e=>{if(e.key==='clipperCRM'&&adoptNewer()){try{render()}catch(_){}}});
+window.addEventListener('storage',e=>{if(e.key==='clipperCRM'&&adoptNewer()){try{render()}catch(_){}try{hsSoon(600)}catch(_){}}});
+/* ---------- The helper owns the lead store and the outreach loop (tools/crm_store.py, tools/outreach_loop.py). This page hands over what you change and shows what the helper learned. ---------- */
+const HSET=['autoStart','startConfirmed','keepDays','startTarget','sendMode','loomAuto','loomAutoSend','loomSendChecked','videoAutoApprove','autoFollowUps','cformOn','cformT1','cformConfirmed','cformFallbackHours','cformDaily','cformAnyTime','cformSubject','cformMsg','cformMsgT1','jitbitCheck','aiEmailCheck','trustHalcrus','halcrusTier','adVoice','videoName','videoHost','loomShow','keepLocalVideos','notifyReady','runStrategy','apprStats'];   /* same list as SETTINGS_KEYS in tools/crm_store.py (plus meta_resolved: the email templates with their defaults filled in) */
+const h32=s=>{let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return (h>>>0).toString(36)};
+const jcopy=v=>JSON.parse(JSON.stringify(v));
+const HS={base:new Map(),sbase:{},out:[],goneOut:[],sset:{},sdel:[],refetch:[],busy:false,again:false,timer:null,ok:null,err:'',at:0,lastLeader:undefined};
+let LOOP=null;
+function hsPersist(){try{const hashes={};HS.base.forEach((j,id)=>{hashes[id]=h32(j)});localStorage.setItem('clipperCRMout',JSON.stringify({out:HS.out,goneOut:HS.goneOut,sset:HS.sset,sdel:HS.sdel,hashes}))}catch(e){}}
+function hsQueue(p){const set=p.set?jcopy(p.set):{},del=p.del||[],a=HS.out.find(x=>x.id===p.id);
+ if(!a){HS.out.push({id:p.id,set,del:[...del]});return}
+ Object.keys(set).forEach(k=>{a.set[k]=set[k];const i=a.del.indexOf(k);if(i>=0)a.del.splice(i,1)});
+ del.forEach(k=>{delete a.set[k];if(!a.del.includes(k))a.del.push(k)})}
+(function hsInit(){let st={};try{st=JSON.parse(localStorage.getItem('clipperCRMout')||'{}')}catch(e){}
+ HS.out=st.out||[];HS.goneOut=st.goneOut||[];HS.sset=st.sset||{};HS.sdel=st.sdel||[];const ph=st.hashes||{},known=Object.keys(ph).length>0;
+ if(S._hrev){   /* never handed over before: leave the base empty, so the first sync offers every lead and setting (the helper only adds what it lacks) */
+  (S.adLeads||[]).forEach(l=>{const id=String(l.id),j=JSON.stringify(l);HS.base.set(id,j);
+   if(known&&(!(id in ph)||ph[id]!==h32(j)))hsQueue({id,set:l,del:[]})});   /* changed (or new) after the last hand-over and never collected: send the whole lead */
+  HSET.forEach(k=>{HS.sbase[k]=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k])})}
+ addEventListener('pagehide',()=>{try{hsCollect()}catch(e){}});
+ setTimeout(()=>hsSoon(200),1500);setInterval(()=>{if(!document.hidden||Date.now()-HS.at>25000)hsSoon(0)},5000);
+ setInterval(()=>{if(Date.now()-HS.at>8000)loopPoll()},5000)})();
+/* what changed since the last hand-over, field by field (so the helper's own edits to the same lead are never overwritten wholesale) */
+function hsCollect(){const seen=new Set();
+ for(const l of (S.adLeads||[])){const id=String(l.id);seen.add(id);const cur=JSON.stringify(l),b=HS.base.get(id);if(b===cur)continue;
+  if(b===undefined)hsQueue({id,set:l,del:[]});
+  else{const bo=JSON.parse(b),set={},del=[];for(const k of Object.keys(l)){if(l[k]!==undefined&&JSON.stringify(l[k])!==JSON.stringify(bo[k]))set[k]=l[k]}for(const k of Object.keys(bo))if(l[k]===undefined)del.push(k);hsQueue({id,set,del})}
+  HS.base.set(id,cur)}
+ const lost=[...HS.base.keys()].filter(id=>!seen.has(id));
+ if(lost.length>20&&lost.length>HS.base.size/4){HS.err='Many advertisers vanished from this page at once ('+lost.length+'); not telling the helper to delete them.';lost.forEach(id=>HS.base.delete(id))}
+ else lost.forEach(id=>{HS.goneOut.push(id);HS.base.delete(id)});
+ HSET.forEach(k=>{const cur=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k]);if(cur===HS.sbase[k])return;HS.sbase[k]=cur;if(cur===undefined){delete HS.sset[k];if(!HS.sdel.includes(k))HS.sdel.push(k)}else{HS.sset[k]=S.settings[k];HS.sdel=HS.sdel.filter(x=>x!==k)}});
+ let mj;try{mj=JSON.stringify(meta())}catch(e){mj=undefined}if(mj!==undefined&&mj!==HS.sbase.meta_resolved){HS.sbase.meta_resolved=mj;HS.sset.meta_resolved=JSON.parse(mj)}
+ hsPersist()}
+function hsSoon(ms){clearTimeout(HS.timer);HS.timer=setTimeout(hsRun,ms==null?400:ms)}
+async function hsFlush(){for(let i=0;i<8;i++){if(HS.busy){await new Promise(r=>setTimeout(r,250));continue}clearTimeout(HS.timer);await hsRun();return}}
+async function hsRun(){if(HS.busy){HS.again=true;return}
+ const lead=isLeader();if(!lead){HS.lastLeader=false;return}
+ if(HS.lastLeader===false){S.adLeads=S.adLeads||[];HS.base=new Map(S.adLeads.map(l=>[String(l.id),JSON.stringify(l)]));HS.sbase={};HSET.forEach(k=>{HS.sbase[k]=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k])})}   /* this tab just became the one that talks to the helper: start from what it has now */
+ HS.lastLeader=true;HS.busy=true;let sent;
+ try{hsCollect();const first=!S._hrev;
+  sent={out:HS.out.splice(0),gone:HS.goneOut.splice(0),refetch:HS.refetch.splice(0),sset:HS.sset,sdel:HS.sdel};HS.sset={};HS.sdel=[];
+  let r;try{const res=await fetch(RUNNER+'/crm/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rev:S._hrev||0,first,patches:sent.out,gone:sent.gone,refetch:sent.refetch,settings:{set:sent.sset,del:sent.sdel}})});r=await res.json();if(!res.ok||!r.ok)throw new Error((r&&r.error)||('HTTP '+res.status))}
+  catch(e){sent.out.forEach(hsQueue);HS.goneOut.unshift(...sent.gone);HS.refetch.push(...sent.refetch);Object.assign(HS.sset,sent.sset,HS.sset);HS.sdel=[...new Set([...sent.sdel,...HS.sdel])];HS.ok=false;HS.err=String(e.message||e);hsPersist();if(LOOP){LOOP=null;loopRefresh()}return}
+  HS.ok=true;HS.err='';hsApply(r)
+ }finally{HS.busy=false;if(HS.again){HS.again=false;hsSoon(300)}}}
+function hsApply(r){let changed=false;S.adLeads=S.adLeads||[];const byId=new Map(S.adLeads.map(l=>[String(l.id),l]));
+ for(const inc of (r.leads||[])){const id=String(inc.id),loc=byId.get(id);
+  if(loc){const bj=HS.base.get(id);if(bj!==undefined&&JSON.stringify(loc)!==bj){HS.refetch.push(id);continue}   /* edited here while the request was out: ask again next time */
+   Object.keys(loc).forEach(k=>{if(!(k in inc))delete loc[k]});Object.assign(loc,inc);const aj=JSON.stringify(loc);if(aj!==bj)changed=true;HS.base.set(id,aj)}
+  else{S.adLeads.push(inc);byId.set(id,inc);HS.base.set(id,JSON.stringify(inc));changed=true}}
+ if((r.gone||[]).length){const g=new Set(r.gone.map(String)),n=S.adLeads.length;S.adLeads=S.adLeads.filter(l=>!g.has(String(l.id)));g.forEach(id=>HS.base.delete(id));if(S.adLeads.length!==n)changed=true;S.adGone=[...new Set([...(S.adGone||[]),...g])].slice(-500)}
+ const st=r.settings||{};
+ for(const [k,v] of Object.entries(st.set||{})){if(k==='meta_resolved')continue;const cur=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k]);if(cur!==HS.sbase[k])continue;const j=JSON.stringify(v);if(j!==cur){S.settings[k]=v;changed=true}HS.sbase[k]=j}
+ for(const k of st.del||[]){if(k==='meta_resolved')continue;const cur=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k]);if(cur!==HS.sbase[k])continue;if(k in S.settings){delete S.settings[k];changed=true}HS.sbase[k]=undefined}
+ S._hrev=r.rev;HS.at=Date.now();save(true);hsPersist();loopApply(r.loop,changed)}
+/* the loop's status: run panel, why it paused, stock, routes of every lead */
+function loopApply(st,dataChanged){if(!st||!st.ok){return}const prev=LOOP;LOOP=st;
+ if(st.loom!=null)LM.connected=st.loom;if(st.halcrus!=null)HC.connected=st.halcrus;
+ SO.busy=!!(st.run&&st.run.state==='working');LM.pipeBusy=!!st.busy;
+ if(st.run&&!(RUN.state==='working'&&RUN.local)&&((st.run.startedAt||0)>=(RUN.startedAt||0)||RUN.state==='idle')){const keep={stopAsked:RUN.stopAsked};Object.assign(RUN,st.run,{local:false});if(st.run.state==='working')RUN.stopAsked=keep.stopAsked}
+ if(prev&&prev.run&&prev.run.state==='working'&&st.run.state!=='working'&&tab==='ads'){const b=document.getElementById('md-reload');if(b)b.click()}
+ const sig=JSON.stringify([st.run&&[st.run.state,st.run.step,st.run.summary,st.run.lastLine],st.auto,st.pipeMsg,st.cfMsg,st.stock,st.counts,st.busy,st.loom,st.halcrus,st.stats,st.store&&st.store.count,st.error,st.queued_requests]);
+ if(sig!==loopApply.sig||dataChanged){loopApply.sig=sig;loopRefresh()}else runRender()}
+function loopRefresh(){const ae=document.activeElement;if(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))return;try{if(tab=='ads')adsV();else if(tab=='dash'||tab=='settings')render()}catch(e){}}
+async function loopPoll(){try{const r=await (await fetch(RUNNER+'/loop/status')).json();if(r&&r.ok)loopApply(r);else if(LOOP){LOOP=null;loopRefresh()}}catch(e){if(LOOP){LOOP=null;loopRefresh()}}}
+/* the buttons: they ask the helper, which does the work one thing at a time (even with this page closed) */
+async function loopAsk(kind,extra){try{await hsFlush();const r=await (await fetch(RUNNER+'/loop/request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,confirm:true,...(extra||{})})})).json();if(r&&r.error){CF.msg=r.error;loopRefresh();return false}setTimeout(loopPoll,600);setTimeout(loopPoll,3000);return true}
+ catch(e){CF.msg='The helper is not running. It starts at login; if it does not, open Terminal and run tools/start_outreach.command.';loopRefresh();return false}}
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const iso=d=>{const x=d||new Date();return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0')};
@@ -209,7 +276,7 @@ function editLead(id,mode){const l=S.leads.find(x=>x.id==id);if(!l)return;const 
   if(d.edpick){const m=$('#edmsg');if(!/^UC/.test(l.id)){m.textContent='Needs a lead with a YouTube channel id.';return}
    try{m.textContent='Checking…';const ep=await pickEpisode('UU'+l.id.slice(2));if(!ep){m.textContent='No uploads found.';return}
     ov.querySelector('[data-f="episode"]').value='https://www.youtube.com/watch?v='+ep.id;ov.querySelector('[data-f="epTitle"]').value=ep.title;m.textContent='Filled. Press Save.'}catch(x){m.textContent=x.message}}}}
-const RUNNER='http://127.0.0.1:8765';
+const RUNNER=(()=>{try{return localStorage.getItem('clipperRunnerUrl')}catch(e){return null}})()||'http://127.0.0.1:8765';   /* tests point this at a stub helper */
 async function pollAwake(){const e=document.getElementById('aw');if(!e)return;
  try{const j=await (await fetch(RUNNER+'/awake')).json();pollAwake.last=j;
   const left=j.seconds_left>3600?Math.floor(j.seconds_left/3600)+'h '+Math.floor(j.seconds_left%3600/60)+'m':Math.ceil(j.seconds_left/60)+'m';
@@ -688,11 +755,13 @@ function metaWire(){const g=id=>document.getElementById(id);
  const loadDrafts=async()=>{MC.busy=true;MC.msg='Reading the Drafts folders of your sending inboxes…';sync();try{const r=await metaApi('/unibox/drafts',{campaign:'meta'});MC.drafts=(r.drafts||[]).map(d=>({...d,ok:false}));MC.msg=(r.errors&&r.errors.length)?'Some inboxes could not be read: '+r.errors[0]:''}catch(e){MC.msg='Helper not running.'}MC.busy=false;sync()};
  g('md-ub').onclick=()=>{tab='unibox';render();ubLoad()};g('md-s1').onclick=()=>{S.settings.runStrategy='proposal';save();sync()};g('md-s2').onclick=()=>{S.settings.runStrategy='loom';save();sync()};
  g('md-reload').onclick=loadDrafts;
- g('md-load').onclick=async()=>{if(RUN.state==='working'||MC.busy||SO.busy||LM.pipeBusy||ES.busy)return;const loom=runStrat()==='loom';runBegin(loom?'Loom videos':'First emails');
+ g('md-load').onclick=async()=>{if(RUN.state==='working'||MC.busy||SO.busy||ES.busy)return;const loom=runStrat()==='loom';
+  if(loom){await loadDrafts();const res=await startOutreach();if(res&&res.cancelled)return;if(!res||!res.asked){runBegin('Loom videos');runEnd('fail','The helper is not running, so nothing could be done. It starts at login. If it is not running, open Terminal and run tools/start_outreach.command.')}return}
+  runBegin('First emails');
   try{runStep('Reading the drafts in your inboxes…');await loadDrafts();
    if(MC.msg==='Helper not running.')return runEnd('fail','The helper is not running, so nothing could be done. It starts at login. If it is not running, open Terminal and run tools/start_outreach.command.');
-   let res;if(loom){res=await startOutreach()}else{runStep('Writing first-email drafts for fresh leads…');res=await proposalDrafts()}
-   runStep('Reloading the drafts…');await loadDrafts();runFinishFrom(res);if(loom&&S.settings.autoStart){S.settings.autoStartAfter=0;setTimeout(autoKeep,15000)}}
+   runStep('Writing first-email drafts for fresh leads…');const res=await proposalDrafts();
+   runStep('Reloading the drafts…');await loadDrafts();runFinishFrom(res)}
   catch(e){runEnd('fail','Something went wrong: '+(e&&e.message||e))}};
  const sendBtn=g('md-send');if(sendBtn)sendBtn.onclick=async()=>{const ok=MC.drafts.filter(d=>d.ok&&shownDraft(d));if(!ok.length)return;if(!confirm(`Send ${ok.length} approved email(s) for real? They go out one at a time, inside your sending hours.`))return;
   const leads=ok.map(d=>(S.adLeads||[]).find(l=>String(l.email||'').toLowerCase()===String(d.to||'').toLowerCase())).filter(Boolean);
@@ -802,7 +871,7 @@ function loomCard(){const m=meta(),cands=loomCandidates(),gm=loomGmail(),ready=c
    <div class="row" style="margin-top:6px"><span class=mut>Loom: <b style="color:${LM.connected?'#22c55e':'#e5a000'}">${LM.connected?'connected':LM.connected===false?'not connected':'checking…'}</b></span><button class="b" id="lp-connect" ${LM.pipeBusy||ES.busy?'disabled':''}>${LM.connected?'Reconnect Loom':'Connect Loom (log in once)'}</button>
     <label class=mut><input type="checkbox" id="lp-show" ${S.settings.loomShow?'checked':''}> show the Loom window while it works (use this for the first run)</label></div>
    <div class="row" style="margin-top:6px"><button class="b p" id="lp-run" ${LM.pipeBusy||ES.busy||(!loomToUpload().length&&!loomToDraft().length)?'disabled':''}>Upload ${loomToUpload().length} approved video(s) to Loom and save the emails as drafts</button>
-    <label><input type="checkbox" id="lp-auto" ${S.settings.loomAuto?'checked':''}> Hands-free while this tab is open</label>
+    <label><input type="checkbox" id="lp-auto" ${S.settings.loomAuto?'checked':''}> Hands-free: the helper uploads, drafts and schedules by itself (also with the browser closed)</label>
     <label ${S.settings.loomAuto?'':'class=mut'}><input type="checkbox" id="lp-send" ${S.settings.loomAutoSend?'checked':''}> and send the approved ones in my sending hours</label></div>
    <div class="row" style="margin-top:4px"><label><input type="checkbox" id="lp-autoappr" ${S.settings.videoAutoApprove!==false?'checked':''}> Approve videos that pass the automatic check (words, ending, sign up link on screen, brand match) so they go to Loom and become drafts by themselves</label>
     <label ${S.settings.loomAutoSend?'':'class=mut'}><input type="checkbox" id="lp-sendchecked" ${S.settings.loomSendChecked?'checked':''}> and send those too, even if I did not watch them</label></div>
@@ -825,55 +894,15 @@ const loomToSend=()=>loomToSendBase(false);
 (()=>{const g=S.settings;if(!g.advFix){g.advFix=1;(S.adLeads||[]).forEach(l=>{if(l.video&&!l.video.ok&&/^no advertiser found/i.test(l.video.reason||'')&&!l.emailedAt&&!l.draftedAt){delete l.video}})}})();   // one time: the lookups were failing, so those 'no advertiser' rejections are tried again
 const sendAuto=()=>S.settings.sendMode==='auto';   // default: you press Send yourself and get a notification when enough are ready
 const loomTitle=l=>`A quick look at ${l.brandName||(l.greet&&l.greet.business)||l.company}'s Meta ads`;
-async function loomUploadApproved(){const todo=loomToUpload().slice(0,3);if(!todo.length)return 0;let n=0;
- await helperJob('/loom/upload',{items:todo.map(l=>({id:l.id,file:l.video.file,title:loomTitle(l),comment:meta().link})),show:!!S.settings.loomShow,keep_local:!!S.settings.keepLocalVideos},t=>{const r=parseTag(t,'LOOM');if(!r)return;const l=(S.adLeads||[]).find(x=>x.id==r.id);if(!l)return;
-  if(r.ok&&r.link){l.loomLink=r.link;l.loomUploadedAt=Date.now();delete l.loomFail;l.loomNoComment=r.comment_posted===false?1:0;l.loomOther=r.other_links||0;if(r.deleted&&l.video){l.video.file='';l.video.inLoomOnly=1}n++}else{l.loomFail=r.error||'upload failed';if(r.link&&!r.ok){l.loomPartial=r.link}if(r.needs_login)LM.connected=false}});
- save();return n}
-async function loomMakeDrafts(){const todo=loomToDraft().slice(0,10);if(!todo.length)return 0;await metaGreet(todo);
- await helperJob('/email/run',{campaign:'meta',mode:'drafts',leads:todo.map(metaPayload),template:metaTemplateObj(),limit:10,step:0},t=>{const r=parseTag(t,'EMAIL');if(!r)return;const l=(S.adLeads||[]).find(x=>x.id==r.id);if(!l)return;if(r.status==='drafted'){l.draftedAt=Date.now();delete l.skipWhy;delete l.msSkip}else if(r.status==='skip'){l.skipWhy=r.why;if(/Microsoft/i.test(r.why||'')&&stratOf(l)!=='loom')l.msSkip=Date.now()}});
- save();return todo.filter(l=>l.draftedAt).length}
-async function loomSendApproved(){const todo=loomToSend().slice(0,8);if(!todo.length)return 0;let sent=0;await metaGreet(todo);
- await helperJob('/email/run',{campaign:'meta',mode:'send',confirm:true,leads:todo.map(metaPayload),template:metaTemplateObj(),limit:8,step:0},t=>{const r=parseTag(t,'EMAIL');if(!r)return;const l=(S.adLeads||[]).find(x=>x.id==r.id);if(!l)return;
-  if(r.status==='sent'){sent++;l.emailedAt=Date.now();l.loomSentAt=Date.now();delete l.draftedAt;delete l.skipWhy}else if(r.status==='skip')l.skipWhy=r.why});
- save();return sent}
-/* One pass of the pipeline. auto=true is the hands-free timer: it also sends, but only inside your sending hours and daily limits. */
-async function loomPipeline(auto){if(LM.pipeBusy||ES.busy)return;LM.pipeBusy=true;const say=m=>{LM.pipeMsg=m;if(tab=='ads')adsV()};
- try{
-  await loomStatus();await queueSync();await loomSyncUploads();loomClean();
-  const up=loomToUpload().length;
-  if(up&&LM.connected===false){say('Loom is not connected. Press "Connect Loom" and log in once.');return}
-  let u=0,d=0,s=0;
-  if(up){say(`Uploading ${Math.min(up,3)} approved video(s) to Loom…`);u=await loomUploadApproved()}
-  if(S.settings.cformOn!==false){say('Looking for contact forms (they go before email)…');await cformStep()}
-  if(loomToDraft().length){say('Saving the emails as drafts…');d=await loomMakeDrafts()}
-  if(auto&&sendAuto()&&S.settings.loomAutoSend&&loomToSend().length){say('Scheduling the approved emails…');s=await loomQueueApproved()}
-  else await readyCheck()
-  if(u||d||s)say(`Uploaded ${u}, saved ${d} draft(s)${auto&&S.settings.loomAutoSend?`, scheduled ${s} to send`:''}.`);else if(!up&&!loomToDraft().length&&!(auto&&loomToSend().length))say('Nothing waiting.')
- }finally{LM.pipeBusy=false;save();if(tab=='ads')adsV()}}
-setInterval(()=>{if(S.settings.loomAuto&&!LM.pipeBusy&&!ES.busy&&isLeader())loomPipeline(true)},120000);
+/* The pipeline (upload to Loom, contact forms, drafts, scheduling) runs in the helper every 2 minutes. These buttons only wake it. */
+async function loomPipeline(auto){return loopAsk('pipeline',{auto:!!auto})}
 /* ---------- Contact forms first: a lead whose website has a contact form gets the Loom message there; email is for the leads without one ---------- */
 const isBounced=l=>!!(l.bounced||l.queueStatus==='bounced');
 const cfDomain=l=>String(l.email||'').split('@')[1]||'';
-function t1Reason(l){   // why this lead may get Template 1 (the plain first message) through its contact form instead of a Loom video
- if(S.settings.cformT1===false||l.loomLink||l.emailedAt||l.draftedAt||l.dnc||l.replied||l.removedAt||l.contacted||!l.email||stratOf(l)==='loom')return '';
- if(l.video&&!l.video.ok&&!/^error|transient/i.test(l.video.reason||''))return 'no Meta ads';
- if(l.adRetry&&(l.adTries||0)>=2)return 'the Ad Library stayed blocked';
- if(l.ineligible&&/email|mail server|disposable|valid/i.test(l.ineligible.why||''))return 'email not usable';
- return ''}
+/* The rules (which route a lead takes, when Template 1 is allowed) are decided by the helper (tools/outreach_loop.py); it reports them for every lead. */
+const t1Reason=l=>(LOOP&&LOOP.t1&&LOOP.t1[String(l.id)])||'';
 const t1Eligible=l=>!!t1Reason(l);
-function cformRoute(l){   // 'wait' (no Loom link yet) | 'check' (form not looked for yet) | 'form-auto' | 'human' (CAPTCHA etc., waiting for you) | 'form-done' | 'email'
- if(S.settings.cformOn===false)return 'email';
- if(l.queueStatus==='sending')return 'email';
- const sent=l.cformSent&&l.cformSent.status,c=l.cform;
- if(sent==='sent'||sent==='unsure')return 'form-done';
- if(!l.loomLink&&!t1Eligible(l))return 'wait';
- if(l.cformSkip||sent==='failed')return 'email';
- if(!c)return (l.emailedAt&&!isBounced(l))?'email':'check';
- if(!c.found)return 'email';
- if(l.emailedAt&&!isBounced(l))return 'email';   // already emailed and not bounced: leave it with email
- if(sent==='needs_human'&&(l.cformTries||0)>=3)return 'email';   // a form that kept failing is not worth more of your time
- if(c.captcha==='visible'||c.needs_human||sent==='needs_human'){const h=S.settings.cformFallbackHours===undefined?48:+S.settings.cformFallbackHours;if(h>0&&Date.now()-(c.at||0)>h*3600e3)return 'email';return 'human'}
- return 'form-auto'}
+const cformRoute=l=>(LOOP&&LOOP.routes&&LOOP.routes[String(l.id)])||'wait';   // 'wait' | 'check' | 'form-auto' | 'human' | 'form-done' | 'email'
 const emailRoute=l=>cformRoute(l)==='email';
 const pendingForm=l=>{const r=cformRoute(l);return r==='form-auto'||r==='human'};
 function cformText(l){const t1=!l.loomLink,m=String(t1?(S.settings.cformMsgT1||meta().first||''):(S.settings.cformMsg||meta().loomEmail||'')),first=(l.greet&&l.greet.first)||'there',biz=l.brandName||(l.greet&&l.greet.business)||l.company,who=(ES.status&&ES.status.sender_name)||'Emmanuel';
@@ -881,57 +910,30 @@ function cformText(l){const t1=!l.loomLink,m=String(t1?(S.settings.cformMsgT1||m
 const cformSubject=()=>S.settings.cformSubject||'A quick find in your Facebook ads';
 const cformSubjectFor=l=>l.loomLink?cformSubject():String(meta().subject||'Cutting wasted Meta ad spend').replace(/\{business\}/g,l.brandName||(l.greet&&l.greet.business)||l.company).replace(/\{([^{}|]+)\|[^{}]*\}/g,'$1');
 const cformVals=()=>({subject:cformSubject(),company:meta().product||'AI Ads Optimization',website:'https://portal.aiadsoptimization.com'});
-async function cformFind(max){const by=id=>(S.adLeads||[]).find(x=>x.id==id);
- const need=(S.adLeads||[]).filter(l=>(l.loomLink||t1Eligible(l))&&!l.cform&&!l.dnc&&!l.cformSkip&&(l.cformTry||0)<2&&!(l.emailedAt&&!isBounced(l))).slice(0,max||10);if(!need.length)return 0;let found=0;
- const ok=await helperJob('/cform/find',{items:need.map(l=>({id:l.id,domain:cfDomain(l),web:l.web||''}))},t=>{const r=parseTag(t,'CFORM');if(!r)return;const l=by(r.id);if(!l)return;const id=r.id;delete r.id;l.cform={...r,at:Date.now()};if(r.found)found++;save()});
- need.forEach(l=>{if(!l.cform){l.cformTry=(l.cformTry||0)+1;if(l.cformTry>=2)l.cform={found:false,why:'the website could not be checked',error:true,at:Date.now()}}});save();return found}
 async function cformConfirmOnce(){if(S.settings.cformConfirmed)return true;
  if(!confirm('Messages will be sent through the contact forms on these companies\' websites, with your Loom video, one at a time inside your sending hours (at most 25 a day). Forms with a CAPTCHA are never touched: they wait for you in the CAPTCHA list.\n\nThis is a one-time OK. After it the pipeline sends form messages by itself. You can switch contact forms off any time with the "Contact forms first" switch.\n\nAllow it?'))return false;
  S.settings.cformConfirmed=1;save();return true}
-async function loomPrefer(list){   /* Template 1 is the fallback: leads held back only because the Ad Library was blocked go back to the Loom video the moment it answers again */
- const blocked=list.filter(l=>!l.loomLink&&t1Reason(l)==='the Ad Library stayed blocked');if(!blocked.length)return;
- let h;if(Date.now()-(AD.healthAt||0)<600000)h=AD.health;else{try{h=(await metaApi('/ads/health',{})).healthy}catch(e){h=null}AD.healthAt=Date.now();AD.health=h}
- if(h===true){blocked.forEach(l=>{delete l.adRetry;l.adTries=0;list.splice(list.indexOf(l),1)});save();CF.msg='The Ad Library is answering again: those leads go back to the Loom video, not Template 1.';S.settings.autoStartAfter=0;setTimeout(autoKeep,3000)}
- else if(h===null){blocked.forEach(l=>list.splice(list.indexOf(l),1))}   /* helper busy (likely making videos) or unsure: wait one more pass rather than send Template 1 by mistake */}
-async function cformSendAuto(manual){const by=id=>(S.adLeads||[]).find(x=>x.id==id);
- const list=(S.adLeads||[]).filter(l=>cformRoute(l)==='form-auto'&&!l.dnc).slice(0,8);if(!list.length)return 0;
- if(!S.settings.cformConfirmed){if(!manual)return 0;if(!await cformConfirmOnce())return 0}
- await loadEmailStatus();if(!S.settings.cformAnyTime&&!(ES.status&&ES.status.in_send_window)){CF.msg='Outside sending hours. Switch on "Allow forms outside sending hours" to send now.';return 0}
- await loomPrefer(list);if(!list.length)return 0;
- await metaGreet(list);let sent=0;
- for(const l of list){if(l.queueStatus==='scheduled'){try{const r=await metaApi('/queue/cancel',{id:l.id});if(r&&r.ok!==false){l.cformMoved=Date.now();delete l.queueStatus}}catch(e){}}}   /* the email was waiting for a slot (the inboxes are full for today): the form goes out instead, so they are never contacted twice */
- const ok=await helperJob('/cform/send',{confirm:true,limit:Math.max(1,Math.min(100,+S.settings.cformDaily||25)),values:cformVals(),items:list.map(l=>({id:l.id,url:l.cform.url,message:cformText(l),subject:cformSubjectFor(l)}))},t=>{const r=parseTag(t,'CFORMSEND');if(!r)return;const l=by(r.id);if(!l)return;
-  if(r.status==='later'){if(l.cformMoved){l.cformSkip=true}return}l.cformSent={at:Date.now(),status:r.status,note:r.note||'',shot:r.shot||''};if(r.status==='sent'||r.status==='unsure'){sent++;if(!l.loomLink){l.cformTpl='t1';l.strategy='proposal'}}save()});
- return sent}
-async function cformStep(){if(S.settings.cformOn===false)return;try{const f=await cformFind(10);if(f)CF.msg=`${f} contact form(s) found.`;await cformSendAuto(false);const w=channelStats().waiting;if(w>=10)notifyNeeds('CAPTCHA forms waiting',`${w} contact forms are filled-in-ready and need a CAPTCHA from you. Open the CRM, Meta Ads tab, step 4, and press "Fill the CAPTCHA forms for me". It takes a few minutes.`,'cform-captcha')}catch(e){}}
-async function cformBatchRun(){const by=id=>(S.adLeads||[]).find(x=>x.id==id);
- const list=(S.adLeads||[]).filter(l=>cformRoute(l)==='human'&&l.cform&&l.cform.url&&!l.dnc).slice(0,250);if(!list.length)return;
+async function cformBatchRun(){   /* the person presses the button: a visible Chrome window, forms pre-filled, THEY solve each CAPTCHA. Nothing here solves one. */
+ const n=Object.values((LOOP&&LOOP.routes)||{}).filter(r=>r==='human').length;if(!n){CF.msg='No CAPTCHA forms are waiting.';adsV();return}
  if(!await cformConfirmOnce())return;
- if(!confirm(`A Chrome window opens and works through ${list.length} contact form${list.length==1?'':'s'}, 8 tabs at a time, each already filled in with your message and Loom link.\n\nSolve the CAPTCHA in a tab and the form is sent by itself, the tab closes and the next form opens, until the list is done. A tab you do not get to within 10 minutes is closed and that lead stays saved for later.\n\nThe CAPTCHAs are yours to solve; nothing here solves them for you.\n\nStart?`))return;
- CF.busy=true;CF.msg=`Working through ${list.length} form(s) in a Chrome window, 8 at a time. Solve each CAPTCHA there.`;adsV();await metaGreet(list);
- try{await helperJob('/cform/batch',{confirm:true,values:cformVals(),items:list.map(l=>({id:l.id,url:l.cform.url,message:cformText(l),subject:cformSubjectFor(l)}))},t=>{const r=parseTag(t,'CFORMSEND');if(!r)return;const l=by(r.id);if(!l)return;
-  if(r.status==='later'){l.cformLaterAt=Date.now();l.cformLaterNote=r.note||''}else{l.cformSent={at:Date.now(),status:r.status,note:r.note||'',shot:r.shot||''};if(r.status==='needs_human')l.cformTries=(l.cformTries||0)+1;if((r.status==='sent'||r.status==='unsure')&&!l.loomLink){l.cformTpl='t1';l.strategy='proposal'}}save();adsV()})}finally{CF.busy=false;CF.msg='';save();adsV()}}
-async function cformRepliesCheck(force){const g=S.settings;if(!force&&Date.now()-(g.cformRepAt||0)<30*60000)return;
- const items=(S.adLeads||[]).filter(l=>l.cformSent&&/sent|unsure/.test(l.cformSent.status)&&!l.cformReply&&Date.now()-(l.cformSent.at||0)<21*864e5).map(l=>({id:l.id,domain:cfDomain(l),email:l.email,since_ts:Math.floor((l.cformSent.at||Date.now())/1000)-3600}));
- g.cformRepAt=Date.now();if(!items.length)return;
- try{const r=await metaApi('/cform/replies',{items});(r.replies||[]).forEach(x=>{const l=(S.adLeads||[]).find(y=>y.id===x.id);if(!l)return;if(x.kind==='auto'){l.cformAuto={at:Date.now(),sub:x.subtype||'automatic',snippet:x.snippet||''};if(l.cformSent&&l.cformSent.status==='unsure'){l.cformSent.status='sent';l.cformSent.note='confirmed by their automatic reply'}return}l.cformReply={at:Date.now(),kind:x.kind,snippet:x.snippet};l.replied=true;if(x.kind==='optout')l.dnc=true});save()}catch(e){}}
-function channelStats(){const L=(S.adLeads||[]).filter(l=>stratOf(l)==='loom'||l.cformSent),pc=(a,b)=>b?Math.round(100*a/b)+'%':'-';
- const em=L.filter(l=>(l.emailedAt||l.queueStatus==='sent')&&!(l.cformSent&&/sent|unsure/.test(l.cformSent.status))),emRep=em.filter(l=>l.replied&&!l.cformReply),emBnc=L.filter(isBounced);
- const fm=L.filter(l=>l.cformSent&&/sent|unsure/.test(l.cformSent.status)),fmRep=fm.filter(l=>l.cformReply),human=L.filter(l=>cformRoute(l)==='human'),rec=fm.filter(isBounced);
- return {t1Sent:L.filter(l=>l.cformTpl==='t1'&&l.cformSent&&/sent|unsure/.test(l.cformSent.status)).length,t1Rep:L.filter(l=>l.cformTpl==='t1'&&l.cformReply).length,emAuto:em.filter(l=>l.autoReply&&!l.replied).length,fmAuto:fm.filter(l=>l.cformAuto&&!l.cformReply).length,emSent:em.length,emRep:emRep.length,emRate:pc(emRep.length,em.length),emBnc:emBnc.length,fmSent:fm.length,fmRep:fmRep.length,fmRate:pc(fmRep.length,fm.length),waiting:human.length,auto:L.filter(l=>cformRoute(l)==='form-auto').length,recovered:rec.length}}
+ if(!confirm(`A Chrome window opens and works through ${n} contact form${n==1?'':'s'}, 8 tabs at a time, each already filled in with your message and Loom link.\n\nSolve the CAPTCHA in a tab and the form is sent by itself, the tab closes and the next form opens, until the list is done. A tab you do not get to within 10 minutes is closed and that lead stays saved for later.\n\nThe CAPTCHAs are yours to solve; nothing here solves them for you.\n\nStart?`))return;
+ CF.msg='The helper opens the window as soon as it is free (it finishes what it is doing first). Solve each CAPTCHA there.';adsV();await loopAsk('captcha')}
+const cformRepliesCheck=()=>loopAsk('replies');
+const ZERO_STATS={t1Sent:0,t1Rep:0,emAuto:0,fmAuto:0,emSent:0,emRep:0,emRate:'-',emBnc:0,fmSent:0,fmRep:0,fmRate:'-',waiting:0,auto:0,recovered:0};
+function channelStats(){return (LOOP&&LOOP.stats)||ZERO_STATS}
 const CF={busy:false,msg:''};
 const AUTOPILOT={startConfirmed:1,autoStart:true,sendMode:'auto',loomAuto:true,loomAutoSend:true,loomSendChecked:true,autoFollowUps:true,cformOn:true,cformT1:true,cformConfirmed:1,cformFallbackHours:24,jitbitCheck:true};
 const autopilotOn=()=>Object.keys(AUTOPILOT).every(k=>S.settings[k]===AUTOPILOT[k]);
 function channelLine(){const K=channelStats();return `<b>Email:</b> ${K.emSent} sent, ${K.emRep} replied (${K.emRate}, people only)${K.emAuto?`, ${K.emAuto} automatic reply only`:''}, ${K.emBnc} bounced. <b>Contact form:</b> ${K.fmSent} sent, ${K.fmRep} replied (${K.fmRate}, people only)${K.fmAuto?`, ${K.fmAuto} automatic reply only`:''}, ${K.t1Sent?` (${K.t1Sent} of them Template 1, ${K.t1Rep} replied)`:''}, ${K.waiting} waiting for you, ${K.auto} queued${K.recovered?`, ${K.recovered} reached after their email bounced`:''}. <span class=mut>Out-of-office and "we received your message" robots are counted separately and never stop follow-ups.</span>`}
-const BUILD='17 Oct, forms first';
+const BUILD='17 Oct, loop in the helper';
 function cformCard(){const K=channelStats(),rows=(S.adLeads||[]).filter(l=>l.cform&&l.cform.found||l.cformSent).sort((a,b)=>((b.cformSent&&b.cformSent.at)||0)-((a.cformSent&&a.cformSent.at)||0)).slice(0,25),
- busy=SO.busy||LM.pipeBusy||ES.busy||CF.busy,nFind=(S.adLeads||[]).filter(l=>(l.loomLink||t1Eligible(l))&&!l.cform&&!l.cformSkip&&(l.cformTry||0)<2&&!(l.emailedAt&&!isBounced(l))).length;
+ busy=ES.busy||CF.busy,nFind=(S.adLeads||[]).filter(l=>(l.loomLink||t1Eligible(l))&&!l.cform&&!l.cformSkip&&(l.cformTry||0)<2&&!(l.emailedAt&&!isBounced(l))).length;
  const stat=l=>{const r=cformRoute(l),c=l.cform||{},s=l.cformSent||{};
   return r==='form-done'?`<b style="color:#22c55e">${s.status==='sent'?'Sent through the form':'Sent (not confirmed by the page)'}</b>${l.cformReply?` · <b style="color:#22c55e">replied</b>`:l.cformAuto?` · <span class=mut>automatic reply (${esc(l.cformAuto.sub)})</span>`:''}${s.shot?` · <a href="${RUNNER}/cform/shot?f=${encodeURIComponent(s.shot)}" target="_blank" rel="noopener">see what happened</a>`:''}`:r==='human'?`<b style="color:#e5a000">Waiting for you</b> <span class=mut>${esc(c.captcha==='visible'?'CAPTCHA':(s.note||c.why||'needs a person'))}${l.cformLaterAt?' · left for later':''}</span>`:r==='form-auto'?'Queued: goes out in sending hours':r==='email'?`<span class=mut>${s.status==='failed'?'Form failed ('+esc(s.note||'')+'), email instead':l.cformSkip?'Email instead':'No form, email instead'}</span>`:'<span class=mut>checking…</span>'};
  const act=l=>{const r=cformRoute(l);return (r==='human'||r==='form-auto')?`${l.cform&&l.cform.url?`<a href="${esc(l.cform.url)}" target="_blank" rel="noopener">Open form</a> `:''}<button class="b" data-cfcopy="${esc(l.id)}">Copy message</button> <button class="b" data-cfskip="${esc(l.id)}" title="Skip the form and use email for this lead">Email instead</button>`:''};
  return `<div style="margin-top:8px"><div class="row"><label><input type="checkbox" id="cf-on" ${S.settings.cformOn!==false?'checked':''}> <b>Contact forms first.</b> If a lead's website has a contact form, the Loom message goes there instead of email. Email is only for leads without a form.</label></div>
   <div class="mut" style="margin-top:4px">Results by channel. ${channelLine()}</div>
-  <div class="row" style="margin-top:6px"><button class="b" id="cf-find" ${busy||!nFind?'disabled':''} title="${busy?'The page is busy with another step':!nFind?'Every lead with a Loom video has already been checked':'Looks at the websites of leads whose video is on Loom'}">Look for contact forms (${nFind} leads)</button><button class="b p" id="cf-send" ${busy||!K.auto?'disabled':''} title="${busy?'The page is busy with another step':!K.auto?'No contact form messages are queued':'Sends the queued messages now (inside sending hours)'}">Send the ${K.auto} queued form message${K.auto==1?'':'s'} now</button><button class="b p" id="cf-batch" ${busy||!K.waiting?'disabled':''} title="${busy?'The page is busy with another step':!K.waiting?'No CAPTCHA forms are waiting':'One press works through every CAPTCHA form (up to 250), 8 tabs at a time, each already filled in. You solve each CAPTCHA, it sends, closes the tab and opens the next.'}">Fill the CAPTCHA forms for me (${K.waiting})</button><button class="b" id="cf-rep" ${busy?'disabled':''}>Check for replies</button><button class="b ${S.settings.cformAnyTime?'p':''}" id="cf-anytime" title="Normally forms go out only inside your sending hours. Switch this on to let them go out at any time, day or night.">Allow forms outside sending hours: ${S.settings.cformAnyTime?'ON':'OFF'}</button><span class="mut cf-msg">${esc(CF.msg||'')}</span></div>
+  <div class="row" style="margin-top:6px"><button class="b" id="cf-find" ${busy||!nFind?'disabled':''} title="${busy?'The page is busy with another step':!nFind?'Every lead with a Loom video has already been checked':'Looks at the websites of leads whose video is on Loom'}">Look for contact forms (${nFind} leads)</button><button class="b p" id="cf-send" ${busy||!K.auto?'disabled':''} title="${busy?'The page is busy with another step':!K.auto?'No contact form messages are queued':'Sends the queued messages now (inside sending hours)'}">Send the ${K.auto} queued form message${K.auto==1?'':'s'} now</button><button class="b p" id="cf-batch" ${busy||!K.waiting?'disabled':''} title="${busy?'The page is busy with another step':!K.waiting?'No CAPTCHA forms are waiting':'One press works through every CAPTCHA form (up to 250), 8 tabs at a time, each already filled in. You solve each CAPTCHA, it sends, closes the tab and opens the next.'}">Fill the CAPTCHA forms for me (${K.waiting})</button><button class="b" id="cf-rep" ${busy?'disabled':''}>Check for replies</button><button class="b ${S.settings.cformAnyTime?'p':''}" id="cf-anytime" title="Normally forms go out only inside your sending hours. Switch this on to let them go out at any time, day or night.">Allow forms outside sending hours: ${S.settings.cformAnyTime?'ON':'OFF'}</button><span class="mut cf-msg">${esc(CF.msg||(LOOP&&LOOP.cfMsg)||'')}</span></div>
   <div class="row" style="margin-top:6px"><label><input type="checkbox" id="cf-t1" ${S.settings.cformT1!==false?'checked':''}> <b>No Meta ads (or the Ad Library stays blocked for 2 hours)?</b> Send Template 1 (the plain first message, no video) through their contact form.</label></div>
   <div class="row" style="margin-top:6px"><label>Subject (for forms that ask for one) <input id="cf-subj" value="${esc(cformSubject())}" style="width:260px"></label> <label>Forms per day <input id="cf-daily" type="number" min="1" max="100" value="${+S.settings.cformDaily||25}" style="width:60px"></label> <label>Email them instead if I have not solved a CAPTCHA within <input id="cf-fb" type="number" min="0" max="720" value="${S.settings.cformFallbackHours===undefined?48:+S.settings.cformFallbackHours}" style="width:56px"> hours (0 = never)</label> <span class=mut>Forms do not use up your email limits: they keep going in sending hours even when every inbox is full for the day. An email still waiting for a slot moves to the form if the site has one.</span></div>
   <details style="margin-top:6px"><summary>Template 1 message for forms <span class=mut>(the Template 1 first email text by default)</span></summary><textarea id="cf-msg1" rows="7" style="width:100%">${esc(S.settings.cformMsgT1||meta().first||'')}</textarea><div class="row"><button class="b" id="cf-msg1-reset">Use the Template 1 text</button></div></details>
@@ -942,76 +944,35 @@ async function helperWait(note,maxMs){const t0=Date.now(),say=m=>{CF.msg=m;docum
   if(!j.running)return true;say(`${note} The helper is busy with "${j.label||'another job'}", waiting for it to finish…`);if(Date.now()-t0>(maxMs||900000)){say('The helper stayed busy, so nothing was started. Press the button again later.');return false}await new Promise(r=>setTimeout(r,3000))}}
 function cformWire(){const g=id=>document.getElementById(id);if(!g('cf-on'))return;
  g('cf-on').onchange=e=>{S.settings.cformOn=e.target.checked;save();adsV()};
- g('cf-find').onclick=async()=>{CF.busy=true;CF.msg='Looking for contact forms…';adsV();try{if(await helperWait('Looking for contact forms.')){CF.msg='Looking for contact forms…';document.querySelectorAll('.cf-msg').forEach(e=>e.textContent=CF.msg);ES.msg='';const f=await cformFind(20);CF.msg=f?`${f} form(s) found.`:(ES.msg||'None of these sites has a usable contact form (they go by email).')}}finally{CF.busy=false;save();adsV()}};
- g('cf-send').onclick=async()=>{CF.busy=true;CF.msg='Sending through contact forms…';adsV();try{if(await helperWait('Sending through contact forms.')){ES.msg='';CF.msg='';const n=await cformSendAuto(true);CF.msg=n?`${n} sent.`:(CF.msg||ES.msg||'Nothing was sent.')}}finally{CF.busy=false;save();adsV()}};
- g('cf-batch').onclick=async()=>{CF.busy=true;CF.msg='';adsV();let free=false;try{free=await helperWait('The CAPTCHA forms are next.')}finally{CF.busy=false;adsV()}if(free)await cformBatchRun();else adsV()};
- g('cf-rep').onclick=async()=>{CF.msg='Checking for replies…';adsV();await cformRepliesCheck(true);CF.msg='Replies checked. '+(channelStats().fmRep?channelStats().fmRep+' form repl'+(channelStats().fmRep==1?'y':'ies')+' so far.':'No replies to forms yet.');adsV()};
+ g('cf-find').onclick=async()=>{CF.msg='Looking for contact forms… (the helper does it as soon as it is free)';adsV();await loopAsk('forms_find')};
+ g('cf-send').onclick=async()=>{if(!S.settings.cformConfirmed&&!await cformConfirmOnce())return;CF.msg='Sending through contact forms… (queued in the helper)';adsV();await loopAsk('forms_send')};
+ g('cf-batch').onclick=()=>cformBatchRun();
+ g('cf-rep').onclick=async()=>{CF.msg='Checking for replies…';adsV();await loopAsk('replies')};
  g('cf-daily').onchange=e=>{S.settings.cformDaily=Math.max(1,Math.min(100,+e.target.value||25));save()};
- g('cf-anytime').onclick=()=>{S.settings.cformAnyTime=!S.settings.cformAnyTime;save();adsV();if(S.settings.cformAnyTime&&S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)};
- g('cf-fb').onchange=e=>{S.settings.cformFallbackHours=Math.max(0,Math.min(720,+e.target.value||0));save();adsV();if(S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)};
- g('cf-t1').onchange=e=>{S.settings.cformT1=e.target.checked;save();adsV();if(e.target.checked&&S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)};
+ g('cf-anytime').onclick=()=>{S.settings.cformAnyTime=!S.settings.cformAnyTime;save();adsV();if(S.settings.cformAnyTime&&S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))};
+ g('cf-fb').onchange=e=>{S.settings.cformFallbackHours=Math.max(0,Math.min(720,+e.target.value||0));save();adsV();if(S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))};
+ g('cf-t1').onchange=e=>{S.settings.cformT1=e.target.checked;save();adsV();if(e.target.checked&&S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))};
  g('cf-msg1').onchange=e=>{S.settings.cformMsgT1=e.target.value;save()};g('cf-msg1-reset').onclick=()=>{delete S.settings.cformMsgT1;save();adsV()};
  g('cf-subj').onchange=e=>{S.settings.cformSubject=e.target.value.trim();save()};
  g('cf-msg').onchange=e=>{S.settings.cformMsg=e.target.value;save()};g('cf-msg-reset').onclick=()=>{delete S.settings.cformMsg;save();adsV()}}
-document.addEventListener('click',e=>{if(e.target.closest('[data-takeover]')){localStorage.setItem('clipperLead',JSON.stringify({id:TAB_ID,t:Date.now()}));adsV();return}const c=e.target.closest('[data-cfcopy]'),k=e.target.closest('[data-cfskip]');
+document.addEventListener('click',e=>{const c=e.target.closest('[data-cfcopy]'),k=e.target.closest('[data-cfskip]');
  if(c){const l=(S.adLeads||[]).find(x=>x.id==c.dataset.cfcopy);if(l){navigator.clipboard.writeText(cformText(l)).catch(()=>{});c.textContent='Copied'}}
- else if(k){const l=(S.adLeads||[]).find(x=>x.id==k.dataset.cfskip);if(l){l.cformSkip=true;save();adsV();if(S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)}}});
+ else if(k){const l=(S.adLeads||[]).find(x=>x.id==k.dataset.cfskip);if(l){l.cformSkip=true;save();adsV();hsFlush().then(()=>loomPipeline(true))}}});
 /* ---------- Start outreach: one button. Finds more leads in HALCRUS only when the pool runs low, makes the videos, uploads, drafts, and hands the sends to the helper's own scheduled queue ---------- */
 const SO={busy:false,msg:'',log:[]},HC={connected:null},SQ={items:[],inWin:null,win:null};
 const whenText=ts=>{const d=new Date(ts*1000),n=new Date(),same=d.toDateString()===n.toDateString(),tom=d.toDateString()===new Date(n.getTime()+864e5).toDateString();return (same?'today':tom?'tomorrow':d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))+' '+d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})};
-function loomClean(){(S.adLeads||[]).forEach(l=>{if(stratOf(l)==='loom'&&l.msSkip){delete l.msSkip;if(/Microsoft/i.test(l.skipWhy||''))delete l.skipWhy}})}
-async function loomSyncUploads(){try{const r=await metaApi('/loom/uploads',{});if(!r||!r.uploads)return 0;const key=s=>String(s).replace(/[^A-Za-z0-9]/g,'').slice(0,24);let n=0;
- for(const [stem,v] of Object.entries(r.uploads)){const l=(S.adLeads||[]).find(x=>key(x.id)===key(stem));if(l&&!l.loomLink&&v.link){l.loomLink=v.link;l.loomUploadedAt=(v.at||0)*1000||Date.now();delete l.loomFail;l.strategy=l.strategy||'loom';n++}}
- if(n){save();if(tab=='ads')adsV()}return n}catch(e){return 0}}
 async function hcStatus(){try{const r=await metaApi('/halcrus/status',{});HC.connected=!!r.connected}catch(e){HC.connected=null}}
-async function hcConnect(){SO.msg='A Chrome window is opening. Log in to HALCRUS there. It closes by itself when you are in.';if(tab=='ads')adsV();try{await helperJob('/halcrus/login',{},()=>{})}catch(e){}await hcStatus();SO.msg=HC.connected?'HALCRUS is connected.':'HALCRUS was not connected. Try again.';if(tab=='ads')adsV()}
-/* What the helper's queue holds is the truth about sending: apply it to the leads (sent, bounced, cancelled...) */
-async function queueSync(){try{const r=await metaApi('/queue/list',{});if(!r||!r.items)return;SQ.items=r.items;SQ.inWin=r.in_send_window;SQ.win=r.window;
- for(const q of r.items){const parts=String(q.id).split('#fu'),l=(S.adLeads||[]).find(x=>String(x.id)===parts[0]);if(!l)continue;
-  if(q.replied)l.replied=true;
-  if(parts.length>1){l.fuQueued=Math.max(l.fuQueued||0,q.step||+parts[1]||0);if(q.status==='sent')l.emailStep=Math.max(l.emailStep||0,q.step||+parts[1]||0);continue}
-  if(q.status==='canceled'&&l.cformMoved)continue;   /* cancelled by us because the contact form took over */
-  l.queueStatus=q.status;l.sendDue=q.due_at||0;
-  if(q.status==='sent'||q.status==='bounced'){if(!l.emailedAt){l.emailedAt=(q.sent_at||0)*1000||Date.now();l.loomSentAt=l.emailedAt}if(!l.firstEmailedAt)l.firstEmailedAt=l.emailedAt;delete l.draftedAt;delete l.skipWhy;if(q.status==='bounced')l.bounced=l.bounced||Date.now()}
-  else if(q.status==='skipped')l.skipWhy=q.why||'skipped'}
- save()}catch(e){}}
-/* Follow-ups: follow up 1 three days after the first email, follow up 2 after seven, never to anyone who replied, asked to stop, or bounced. The helper's queue sends them in the sending hours. */
-const fuDue=l=>{if(!l.emailedAt||l.replied||l.dnc||l.bounced)return 0;const d=Date.now()-(l.firstEmailedAt||l.emailedAt),st=l.emailStep||0;return st===0&&d>=3*DAY-36e5?1:st===1&&d>=7*DAY-36e5?2:0};
-async function loomQueueFollowups(){const due=(S.adLeads||[]).map(l=>[l,fuDue(l)]).filter(([l,st])=>st&&(l.fuQueued||0)<st);if(!due.length)return 0;await metaGreet(due.map(x=>x[0]));let n=0;
- for(const st of [1,2]){const grp=due.filter(x=>x[1]===st).map(x=>x[0]);if(!grp.length)continue;let r;
-  try{r=await metaApi('/queue/add',{confirm:true,campaign:'meta',step:st,template:metaTemplateObj(),items:grp.map(l=>({id:l.id+'#fu'+st,to:l.email,company:l.brandName||l.company,lead:metaPayload(l)}))})}catch(e){return n}
-  if(!r||r.error)continue;
-  for(const x of r.items||[]){const l=(S.adLeads||[]).find(y=>String(y.id)===String(x.id).split('#fu')[0]);if(l&&(x.status==='scheduled'||x.why==='already in the queue')){l.fuQueued=st;n++}}}
- save();return n}
-async function loomQueueApproved(manual){const todo=loomToSendBase(!!manual).slice(0,60);if(!todo.length)return 0;await metaGreet(todo);let r;
- try{r=await metaApi('/queue/add',{confirm:true,campaign:'meta',template:metaTemplateObj(),items:todo.map(l=>({id:l.id,to:l.email,company:l.brandName||l.company,lead:metaPayload(l)}))})}catch(e){LM.pipeMsg='Helper not running, nothing was scheduled.';return 0}
- if(!r||r.error){LM.pipeMsg='Not scheduled: '+((r&&r.error)||'no answer');return 0}
- let n=0;for(const x of r.items||[]){const l=(S.adLeads||[]).find(y=>String(y.id)===String(x.id));if(!l)continue;if(x.status==='scheduled'){l.queueStatus='scheduled';l.sendDue=x.due_at;n++}else if(x.status==='skipped')l.skipWhy=x.why}
- save();await queueSync();return n}
-const startPool=()=>(S.adLeads||[]).filter(l=>l.email&&!l.dnc&&!l.replied&&!l.contacted&&!l.emailedAt&&!l.loomSentAt&&!l.loomLink&&!l.bounced&&!queued(l)&&!l.removedAt&&!(l.ineligible&&Date.now()-l.ineligible.at<6048e5)&&stratOf(l)!=='proposal'&&!(l.video&&(l.video.ok||l.video.madeAt))).sort((a,b)=>(!!b.top-!!a.top)||((b.score||0)-(a.score||0)));
-function addHalcrusLead(r){S.adLeads=S.adLeads||[];const have=new Set(S.adLeads.map(x=>String(x.company).toLowerCase())),em=new Set(S.adLeads.map(x=>String(x.email||'').toLowerCase()));
- if(!r.company||have.has(r.company.toLowerCase())||em.has(String(r.email).toLowerCase()))return 0;
- S.adLeads.push({id:'AD'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),company:r.company,web:'',fb:'',email:r.email,phones:[],person:r.name&&r.name!=='—'?r.name:'',title:'',linkedin:'',signal:r.why||'',est:'',siteEmails:r.others||[],contacted:'',score:+r.score||0,checkedAt:r.name?Date.now():0,top:1,source:'halcrus',category:r.category||''});return 1}
-async function halcrusMore(n){await hcStatus();if(!HC.connected)return -1;
- const adl=S.adLeads||[],known_emails=adl.flatMap(l=>[l.email,...(l.siteEmails||[])]).filter(Boolean).map(x=>String(x).toLowerCase()),known_companies=adl.map(l=>l.company).filter(Boolean);
- let got=0,end=null;await helperJob('/halcrus/leads',{want:n,tier:S.settings.halcrusTier||'Hot',known_emails,known_companies},t=>{let r;if(r=parseTag(t,'HALCRUS'))got+=addHalcrusLead(r);else if(r=parseTag(t,'HALCRUSEND'))end=r});
- HC.lastFound=end?end.found||0:0;save();if(end&&end.needs_login){HC.connected=false;return -1}if(end&&end.error)return -2;return got}
-async function makeAdVideos(todo){const by=id=>(S.adLeads||[]).find(x=>x.id==id),nm=x=>String(x||'').toLowerCase().replace(/[^a-z0-9]/g,'');
- await helperJob('/ads/video',{items:todo.map(l=>({id:l.id,company:l.company,email:l.email,web:l.web||'',first:(l.greet&&l.greet.first)||l.company,business:(l.greet&&l.greet.business)||l.company})),voice:voiceSel(),narrator:narratorName(),product:meta().product,link:'https://portal.aiadsoptimization.com/signup',host:S.settings.videoHost||'loom'},t=>{
-  const r=parseTag(t,'ADVIDEO');if(!r)return;const l=by(r.id);if(!l)return;if(r.transient){AD.lookupFail=(AD.lookupFail||0)+1;l.adRetry=Date.now();l.adTries=(l.adTries||0)+1;delete l.video;save();return}l.video={ok:r.ok,reason:r.reason,link:r.link,facts:r.facts,script:r.script,madeAt:Date.now()};
-  if(r.ok&&r.display_name&&nm(r.display_name)!==nm(l.company))l.brandName=r.display_name;
-  if(r.ok){l.strategy='loom';l.video.file=r.file;if(r.facts&&r.facts.active)l.adsCount=r.facts.active;l.videoAuto=1;l.videoQa=r.qa||null;l.videoApproved=(r.qa&&r.qa.ok&&S.settings.videoAutoApprove!==false)?Date.now():0;l.videoAutoApproved=l.videoApproved?1:0;l.video.host=S.settings.videoHost||'loom';if(r.link&&l.video.host==='drive')l.loomLink=r.link}
-  save()});
- return todo.filter(l=>l.video&&l.video.ok).length}
+async function hcConnect(){SO.msg='A Chrome window is opening. Log in to HALCRUS there. It closes by itself when you are in.';if(tab=='ads')adsV();try{if(await helperWait('Connecting HALCRUS.'))await helperJob('/halcrus/login',{},()=>{})}catch(e){}await hcStatus();SO.msg=HC.connected?'HALCRUS is connected.':'HALCRUS was not connected. Try again.';if(tab=='ads')adsV()}
+async function queueSync(){try{const r=await metaApi('/queue/list',{});if(!r||!r.items)return;SQ.items=r.items;SQ.inWin=r.in_send_window;SQ.win=r.window}catch(e){}}   /* the Scheduled sends table; the helper applies the queue to the leads itself */
 /* ---------- Live status of the one-button run: working, maybe stuck, done, needs attention, failed ---------- */
 const RUN={state:'idle',label:'',step:'',startedAt:0,endedAt:0,stepAt:0,lastRaw:'',lastLen:0,lastLine:'',lastLineAt:0,steps:[],summary:'',details:[],stopAsked:false};
 const runMin=s=>s>=60?Math.floor(s/60)+' min '+(s%60)+' s':s+' s';
 function runRender(){document.querySelectorAll('.run-panel').forEach(el=>{el.innerHTML=runPanelHTML()})}
-function runBegin(label){Object.assign(RUN,{state:'working',label,step:'Starting…',startedAt:Date.now(),endedAt:0,stepAt:Date.now(),lastLineAt:0,steps:[],summary:'',details:[],stopAsked:false});if(tab=='ads')adsV();else runRender()}
+function runBegin(label){Object.assign(RUN,{local:true,state:'working',label,step:'Starting…',startedAt:Date.now(),endedAt:0,stepAt:Date.now(),lastLineAt:0,steps:[],summary:'',details:[],stopAsked:false});if(tab=='ads')adsV();else runRender()}
 function runStep(m){if(RUN.state!=='working')return;RUN.step=m;RUN.stepAt=Date.now();RUN.steps.push(new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit',second:'2-digit'})+'  '+m);runRender()}
 function runEnd(state,summary,details){RUN.state=state;RUN.summary=summary;RUN.details=details||[];RUN.endedAt=Date.now();if(tab=='ads')adsV();else runRender()}
 const runPretty=t=>{t=String(t||'');const m=t.match(/^(ADVIDEO|LOOM|EMAIL|HALCRUSEND|HALCRUS) /);if(!m)return t.slice(0,140);return {ADVIDEO:'a video finished',LOOM:'a video was uploaded to Loom',EMAIL:'an email draft was handled',HALCRUS:'a new lead was found',HALCRUSEND:'finished reading HALCRUS'}[m[1]]};
-function runTick(){if(RUN.state!=='working')return;const L=ES.lines||[],last=L[L.length-1];if(last!==RUN.lastRaw||L.length!==RUN.lastLen){RUN.lastRaw=last;RUN.lastLen=L.length;RUN.lastLine=runPretty(last);RUN.lastLineAt=Date.now()}runRender()}
+function runTick(){if(RUN.state!=='working')return;if(!RUN.local){runRender();return}const L=ES.lines||[],last=L[L.length-1];if(last!==RUN.lastRaw||L.length!==RUN.lastLen){RUN.lastRaw=last;RUN.lastLen=L.length;RUN.lastLine=runPretty(last);RUN.lastLineAt=Date.now()}runRender()}
 setInterval(runTick,3000);
 function runPanelHTML(){const r=RUN;if(r.state==='idle')return '';const end=r.endedAt||Date.now(),el=Math.round((end-r.startedAt)/1000);
  const log=r.steps.length?`<details style="margin-top:4px"><summary class=mut>What happened</summary><div class=mut style="white-space:pre-wrap">${r.steps.slice(-30).map(esc).join('\n')}</div></details>`:'';
@@ -1036,81 +997,28 @@ function runFinishFrom(res){const d=[];
 document.addEventListener('click',async e=>{if(e.target&&e.target.id==='run-stop'){RUN.stopAsked=true;runRender();try{await fetch(RUNNER+'/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})}catch(_){}}});
 const secOpen=k=>(S.settings.secOpen||{})[k]?'open':'';
 document.addEventListener('toggle',e=>{const d=e.target;if(d&&d.dataset&&d.dataset.sec){S.settings.secOpen=S.settings.secOpen||{};S.settings.secOpen[d.dataset.sec]=d.open;save()}},true);
-/* Before a video is made: a HALCRUS lead's email is checked (format, mail server, optionally Google AI), then the helper says whether the Loom email could actually be sent to it */
-async function checkLeadEmails(leads){const fresh=leads.filter(l=>l.email&&!(l.emailCheck&&l.emailCheck.at)).slice(0,40);if(!fresh.length)return;
- const ai=S.settings.aiEmailCheck===true;
- await helperJob('/emails/check',{ai,jitbit:S.settings.jitbitCheck!==false,items:fresh.map(l=>({id:l.id,email:l.email,company:l.brandName||l.company,web:l.web||''}))},t=>{const r=parseTag(t,'EMAILCHECK');if(!r)return;const l=(S.adLeads||[]).find(x=>String(x.id)===String(r.id));if(!l)return;
-  l.emailCheck={valid:r.valid,level:r.level,why:r.why,ai:r.ai,reason:r.reason,at:Date.now()};if(r.valid===false)l.ineligible={why:'email: '+r.why,at:Date.now()}});save()}
-async function loomEligible(leads){if(!leads.length)return {ok:[],no:[]};let r;
- try{r=await metaApi('/email/preview',{step:0,limit:Math.max(60,leads.length),template:metaTemplateObj(),leads:leads.map(l=>{const p=metaPayload(l);return {...p,tplId:'meta-loom',vars:{...p.vars,loom_link:'https://www.loom.com/share/preview'}}})})}catch(e){return {ok:leads,no:[]}}
- if(!r||!r.items)return {ok:leads,no:[]};const by={};r.items.forEach(it=>by[String(it.id)]=it);const ok=[],no=[];
- leads.forEach(l=>{const it=by[String(l.id)];if(!it||it.status==='ready')ok.push(l);else no.push({l,why:it.why||'it would be skipped'})});return {ok,no}}
-const dailyCap=()=>Math.max(10,((ES.status&&ES.status.inboxes)||[]).filter(i=>!i.paused).reduce((a,i)=>a+(+i.cap||0),0));   /* what the inboxes may send today */
-const stockNow=()=>(S.adLeads||[]).filter(l=>stratOf(l)==='loom'&&(l.draftedAt||queued(l)||pendingForm(l))&&!l.emailedAt&&!l.dnc&&!l.removedAt&&!l.bounced&&!l.replied&&l.queueStatus!=='sent').length;   /* drafts saved + scheduled, not sent yet */
-const keepDays=()=>Math.max(1,Math.min(7,+S.settings.keepDays||2)),stockGoal=()=>keepDays()*dailyCap();
-async function startOutreach(count){if(SO.busy||LM.pipeBusy||ES.busy)return {busy:true};SO.busy=true;SO.log=[];const say=m=>{SO.msg=m;SO.log.push(new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'  '+m);runStep(m);if(tab=='ads')adsV()};
- try{
-  if(!S.settings.startConfirmed){
-   if(!confirm('Start outreach will make videos, upload them to your Loom and save the emails as approved drafts. By default NOTHING is sent until you press "Send" yourself: it notifies you when enough approved emails are ready (you choose how many in the Start card).\n\nIt keeps going by itself while this page is open (you can switch that off in the Start card). Continue?'))return {cancelled:true};
-   S.settings.startConfirmed=1;S.settings.loomAuto=true;S.settings.loomAutoSend=true;S.settings.autoStart=true;if(!S.settings.sendMode)S.settings.sendMode='ask';
-   S.settings.loomSendChecked=!!S.settings.loomSendChecked;save()}
-  const target=Math.max(1,Math.min(10,+count>0?+count:(+S.settings.startTarget||10)));
-  (S.adLeads||[]).forEach(l=>{if(l.loomFail&&!l.loomLink&&l.video&&l.video.ok&&l.video.file)delete l.loomFail});   // a new run retries videos whose Loom step failed (the helper remembers what is already uploaded, so nothing is uploaded twice)
-  say('Checking the helper…');await loadEmailStatus();if(!ES.status){return {fatal:'The helper is not running, so nothing could be done. It starts at login. If it is not running, open Terminal and run tools/start_outreach.command.'}}
-  if(!ES.status.ready){return {fatal:'Email is not set up yet: '+(ES.status.problems||[]).join('; ')}}
-  await queueSync();await loomStatus();
-  const snap=()=>({loom:(S.adLeads||[]).filter(l=>l.loomLink).length,drafted:(S.adLeads||[]).filter(l=>l.draftedAt||l.emailedAt).length}),s0=snap(),rejected=[],notes=[];let noLeads=false;
-  if(LM.connected===false){say('Note: Loom is not connected, so videos will be made but not uploaded until you press "Connect Loom".');notes.push('Loom is not connected: press "Connect Loom" and log in so the videos can be uploaded.')}
-  let made=0,tries=0,noHc=false,adBlocked=false;
-  while(made<target&&tries<14){tries++;
-   let pool=startPool();
-   if(pool.length<(target-made)*2&&!noHc){say(`Only ${pool.length} lead(s) ready, looking for more in HALCRUS…`);
-    const got=await halcrusMore(Math.max(20,(target-made)*4));
-    if(got===-1){say('HALCRUS is not connected. Press "Connect HALCRUS" and log in once. Continuing with the leads I have.');notes.push('HALCRUS is not connected, so no new leads could be found: press "Connect HALCRUS" and log in.');noHc=true}
-    else if(got===-2){say('Could not read HALCRUS right now. Continuing with the leads I have.');notes.push('HALCRUS could not be read just now.');noHc=true}
-    else say(got?`Added ${got} new lead(s) from HALCRUS.`:(HC.lastFound?`HALCRUS returned ${HC.lastFound} lead(s) but every one is already in your CRM.`:'HALCRUS had no new matching leads on the pages it looked at.'));
-    if(got===0)noHc=true;
-    pool=startPool()}
-   if(pool.length){const probe=pool.slice(0,Math.max(8,(target-made)*3));
-    if(probe.some(l=>l.email&&!(l.emailCheck&&l.emailCheck.at))){say(S.settings.aiEmailCheck===true?`Checking ${probe.length} email(s) with Jitbit and Google AI before making any video…`:S.settings.jitbitCheck!==false?`Checking ${probe.length} email(s) with Jitbit List Cleaner before making any video…`:`Checking ${probe.length} email(s) before making any video…`);await checkLeadEmails(probe);pool=startPool()}
-    const probe2=pool.slice(0,Math.max(8,(target-made)*3)),fresh=probe2.filter(l=>!(l.eligOk&&Date.now()-l.eligOk<864e5));
-    if(fresh.length){say(`Making sure ${fresh.length} lead(s) can be emailed before spending time on their videos…`);
-     const el=await loomEligible(fresh);el.ok.forEach(l=>{l.eligOk=Date.now()});el.no.forEach(({l,why})=>{l.ineligible={why,at:Date.now()};rejected.push({company:l.company,reason:'not emailed: '+why})});save();
-     if(el.no.length)say(`${el.no.length} lead(s) skipped before making a video (${[...new Set(el.no.map(x=>x.why))].slice(0,2).join('; ')}).`)}
-    pool=startPool()}
-   const batch=pool.slice(0,Math.min(5,target-made));if(!batch.length){say(made?'No more leads to make videos for.':'There are no leads to make videos for.');if(!made)noLeads=true;break}
-   say(`Making ${batch.length} video(s): ${batch.map(l=>l.company).join(', ')}…`);await metaGreet(batch);AD.lookupFail=0;
-   const ok=await makeAdVideos(batch);made+=ok;
-   if(AD.lookupFail>=Math.max(2,batch.length-ok)&&!ok){say('The Meta Ad Library is not answering properly right now (it may be limiting requests). Stopping here and trying again later; none of these leads were marked as rejected.');notes.push('The Meta Ad Library stopped answering (likely rate limiting). Leads were not rejected; it will try again later.');adBlocked=true;break}
-   const bad=batch.filter(l=>l.video&&!l.video.ok);bad.forEach(l=>rejected.push({company:l.company,reason:(l.video&&l.video.reason)||'it failed'}));say(`${ok} of ${batch.length} made${bad.length?`; skipped ${bad.map(l=>l.company+' ('+((l.video&&l.video.reason)||'failed')+')').join(', ')}`:''}.`)}
-  const auto=(S.adLeads||[]).filter(l=>l.videoAuto&&l.videoAutoApproved&&!l.emailedAt&&!queued(l)).length,look=(S.adLeads||[]).filter(l=>l.videoAuto&&!l.videoApproved&&!l.emailedAt&&!l.loomLink).length;
-  say(`Videos ready: ${made}.${look?` ${look} need a human look before they go on.`:''} Uploading, saving drafts and scheduling…`);
-  LM.pipeBusy=false;await loomPipeline(true);await queueSync();
-  const act=(SQ.items||[]).filter(x=>x.status==='scheduled'),nx=act.length?Math.min(...act.map(x=>x.due_at)):0;
-  const rdy=loomToSendBase(true).length;say(!sendAuto()&&rdy?`${rdy} approved email${rdy==1?' is':'s are'} ready. Press "Send ${rdy} approved email${rdy==1?'':'s'}" when you want ${rdy==1?'it':'them'} to go out.`:act.length?`${act.length} email(s) scheduled. The first goes out ${whenText(nx)}.`:(LM.connected===false?'Videos are ready. Connect Loom, then press Start again to upload and schedule them.':'Nothing scheduled yet; anything that needs your approval is listed above.'));
-  const nc=(S.adLeads||[]).filter(l=>l.loomNoComment&&!l.emailedAt).length,ot=(S.adLeads||[]).filter(l=>l.loomOther&&!l.emailedAt).length;
-  if(nc)notes.push(`${nc} video${nc==1?' is':'s are'} on Loom but the comment with the sign up link was not posted: add it in Loom, or run again.`);
-  if(ot)notes.push(`${ot} video${ot==1?'':'s'} show other links under them in Loom. Only the sign up link is wanted: remove the others in Loom.`);
-  const s1=snap();return {made,rejected,notes,noLeads,adBlocked,uploaded:Math.max(0,s1.loom-s0.loom),drafted:Math.max(0,s1.drafted-s0.drafted),ready:rdy,loomDown:LM.connected===false};
- }catch(e){say('Stopped: '+(e&&e.message||e));return {fatal:'Stopped by an error: '+(e&&e.message||e)}}finally{SO.busy=false;save();if(tab=='ads')adsV()}}
+/* Email checks, the Ad Library brand check, videos, Loom, drafts, forms and sends all happen in the helper. These are the numbers it reports. */
+const dailyCap=()=>(LOOP&&LOOP.stock&&LOOP.stock.dailyCap)||0;
+const stockNow=()=>(LOOP&&LOOP.stock&&LOOP.stock.now)||0;
+const keepDays=()=>Math.max(1,Math.min(7,+S.settings.keepDays||2)),stockGoal=()=>(LOOP&&LOOP.stock&&LOOP.stock.goal)||0;
+async function startOutreach(count){   /* the big button: the first press asks the questions that decide what may be sent; the helper does the rest */
+ if(!S.settings.startConfirmed){
+  if(!confirm('Start outreach will make videos, upload them to your Loom and save the emails as approved drafts. By default NOTHING is sent until you press "Send" yourself: it notifies you when enough approved emails are ready (you choose how many in the Start card).\n\nThe helper keeps going by itself, even with this browser closed (you can switch that off in the Start card). Continue?'))return {cancelled:true};
+  S.settings.startConfirmed=1;S.settings.loomAuto=true;S.settings.loomAutoSend=true;S.settings.autoStart=true;if(!S.settings.sendMode)S.settings.sendMode='ask';
+  S.settings.loomSendChecked=!!S.settings.loomSendChecked;save()}
+ return {asked:await loopAsk('run',{count:count||(+S.settings.startTarget||10)})}}
 const sqLabel={scheduled:'scheduled',sending:'sending now',sent:'sent',canceled:'canceled',failed:'failed',bounced:'bounced',skipped:'skipped'};
 function sqTable(){const q=SQ.items||[];if(!q.length)return '';const cnt=k=>q.filter(x=>x.status===k).length;
  const row=x=>{const h=(x.history||[]).slice(-1)[0],note=h?`${h.event}${h.note?': '+h.note:''}`:'',act=x.status==='scheduled'?`<button class="b" data-sq="cancel" data-id="${esc(x.id)}">Cancel</button>`:(x.status==='canceled'||x.status==='failed')?`<button class="b" data-sq="resched" data-id="${esc(x.id)}">Reschedule</button>`:'',ts=(x.status==='scheduled'||x.status==='sending')?x.due_at:x.sent_at;
   return `<tr><td><b>${esc(x.company||x.to)}</b><br><span class=mut>${esc(x.to)}</span></td><td>${sqLabel[x.status]||esc(x.status)}${x.replied?' · replied':''}</td><td>${ts?esc(whenText(ts)):''}</td><td class=mut>${esc(note)}</td><td>${act}</td></tr>`};
  return `<div class="tw" style="margin-top:8px"><b>Scheduled sends</b> <span class=mut>${cnt('scheduled')} waiting · ${cnt('sent')} sent · ${cnt('bounced')} bounced · ${cnt('canceled')+cnt('failed')} need a decision. The helper keeps this list until each email is really sent, and moves the rest up when one drops out.</span><table><tr><th>Lead</th><th>Status</th><th>When</th><th>Last note</th><th></th></tr>${q.slice(0,40).map(row).join('')}</table></div>`}
-/* "Ready to send": you press Send yourself. When X approved emails are waiting you get a notification (Mac and phone), again for every further X. */
-async function readyCheck(){if(sendAuto())return;const n=loomToSendBase(true).length,x=Math.max(1,+S.settings.notifyReady||10),k=Math.floor(n/x);
- if(n>=x){await loadEmailStatus();if(!(ES.status&&ES.status.in_send_window))return}   /* ready ahead of time is fine: the notification comes when sending hours are open */
- if(k>(S.settings.readyNotified||0)){S.settings.readyNotified=k;save();try{await fetch(RUNNER+'/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:'Ready to send',message:`Sending hours are open and ${n} approved emails are ready (videos are in Loom). Open the CRM (Meta Ads tab) and press "Send ${n} approved emails" to start.`,key:'ready-'+k+'-'+Date.now(),every:60})})}catch(e){}}
- else if(n<x&&S.settings.readyNotified){S.settings.readyNotified=0;save()}}
-async function sendReadyNow(){if(SO.busy||LM.pipeBusy||ES.busy)return;const list=loomToSendBase(true),auto=list.filter(l=>l.videoAutoApproved).length;if(!list.length)return;
+async function sendReadyNow(){const list=loomToSendBase(true),auto=list.filter(l=>l.videoAutoApproved).length;if(!list.length)return;
  if(!confirm(`Start sending ${list.length} approved email${list.length==1?'':'s'}?${auto?`\n\n${auto} of them passed the automatic video check and were not watched by you.`:''}\n\nThey go out one by one in your sending hours (right away if you are inside them, otherwise from the next opening), spaced by your delay and inbox limits. You can cancel any of them in the Scheduled sends table.`))return;
- SO.busy=true;if(tab=='ads')adsV();let n=0;try{await loomStatus();n=await loomQueueApproved(true);await queueSync();
-  const act=(SQ.items||[]).filter(x=>x.status==='scheduled'),nx=act.length?Math.min(...act.map(x=>x.due_at)):0;SO.msg=n?`${n} email(s) scheduled. The first goes out ${whenText(nx)}.`:(LM.pipeMsg||'Nothing was scheduled.');S.settings.readyNotified=0;save()}finally{SO.busy=false;if(tab=='ads')adsV()}}
+ SO.msg='Scheduling…';if(tab=='ads')adsV();await loopAsk('send_ready')}
 /* Your Loom videos: every video made, where it is, and what is still to do */
 function approveVideo(l){l.videoApproved=Date.now();l.videoAutoApproved=0;trackAppr(l,'ok')}
 const unwatchedVideos=()=>(S.adLeads||[]).filter(l=>l.video&&l.video.ok&&(!l.videoApproved||l.videoAutoApproved)&&!(l.emailedAt||l.queueStatus==='sent'));
-document.addEventListener('click',e=>{const t=e.target.closest('[data-adtpl]');if(t){AD.tpl=t.dataset.adtpl;if(tab=='ads')adsV();return}const b=e.target.closest('[data-appr]');if(!b)return;const l=(S.adLeads||[]).find(x=>String(x.id)===b.dataset.appr);if(!l)return;approveVideo(l);save();if(tab=='ads')adsV();if(S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)});
+document.addEventListener('click',e=>{const t=e.target.closest('[data-adtpl]');if(t){AD.tpl=t.dataset.adtpl;if(tab=='ads')adsV();return}const b=e.target.closest('[data-appr]');if(!b)return;const l=(S.adLeads||[]).find(x=>String(x.id)===b.dataset.appr);if(!l)return;approveVideo(l);save();if(tab=='ads')adsV();if(S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))});
 function videosPanel(){const L=(S.adLeads||[]).filter(l=>(l.video&&l.video.ok)||l.loomLink).sort((a,b)=>(((b.video||{}).madeAt)||b.loomUploadedAt||0)-(((a.video||{}).madeAt)||a.loomUploadedAt||0)).slice(0,25);
  const open=(S.settings.secOpen||{}).vids===false?'':'open';
  const chip=(ok,t,warn)=>`<span style="white-space:nowrap;margin-right:6px;color:${ok?'#22c55e':warn?'#e5a000':'var(--mut,#888)'}">${ok?'✓':warn?'⚠':'·'} ${t}</span>`;
@@ -1118,7 +1026,7 @@ function videosPanel(){const L=(S.adLeads||[]).filter(l=>(l.video&&l.video.ok)||
   const next=l.loomFail?`Loom step failed (${esc(String(l.loomFail).slice(0,80))}). It is retried on the next run.`:!l.loomLink&&v.ok&&!l.videoApproved&&l.videoQa&&!l.videoQa.ok?`Needs your look: ${esc(l.videoQa.reason||'')}`:!l.loomLink&&v.ok?'Waiting to upload to Loom (next run or the automatic pass).':l.loomLink&&!l.draftedAt&&!sent?'Waiting to be saved as a draft (next run or the automatic pass).':l.draftedAt&&!sent&&!sch?'Draft saved. Review it, then Send.':sch?'Scheduled to send.':sent?'Sent.':'';
   return `<tr><td><b>${esc(l.brandName||l.company)}</b><br><span class=mut>${esc(l.email||'')}</span></td><td>${chip(!!v.ok,'made')}${chip(!!l.loomLink,'on Loom')}${l.videoApproved&&!l.videoAutoApproved?chip(true,'approved by you'):l.videoApproved?chip(false,'passed the check, not watched by you',true):chip(false,'not approved',!!v.ok)}${l.loomLink?chip(!l.loomNoComment,'link + comment',!!l.loomNoComment):''}${chip(!!(l.draftedAt||sent),'draft')}${chip(sch||sent,sent?'sent':sch?'scheduled':'send')}<div class=mut style="margin-top:2px">${next}</div></td><td>${l.loomLink?`<a href="${esc(l.loomLink)}" target="_blank" rel="noopener">Open in Loom</a>`:'<span class=mut>not on Loom yet</span>'}${v.ok&&!(l.videoApproved&&!l.videoAutoApproved)&&!sent?`<br><button class="b" data-appr="${esc(l.id)}" style="margin-top:4px">✓ I watched it, approve</button>`:''}</td></tr>`};
  return `<details data-sec="vids" ${open} style="margin-top:8px"><summary><b>Your Loom videos</b> <span class=mut>${L.length?`${L.length} · ${L.filter(l=>l.loomLink).length} on Loom · ${L.filter(l=>l.draftedAt&&!(l.emailedAt||l.queueStatus==='sent')).length} with a draft saved`:'none yet'}</span></summary>${L.length?`<div class="tw"><table><tr><th>Lead</th><th>Progress</th><th>Video</th></tr>${L.map(row).join('')}</table></div>`:`<div class=mut>No videos yet. Press the big button to make some; each one is listed here with its Loom link.</div>`}</details>`}
-function startCard(){const st=ES.status||{},w=st.window||SQ.win||{start_hour:9,end_hour:17},nReady=loomToSendBase(true).length,nFin=loomToUpload().length+loomToDraft().length,busy=SO.busy||LM.pipeBusy||ES.busy,nWatch=unwatchedVideos().length;
+function startCard(){const st=ES.status||{},w=st.window||SQ.win||{start_hour:9,end_hour:17},nReady=loomToSendBase(true).length,nFin=loomToUpload().length+loomToDraft().length,busy=ES.busy,nWatch=unwatchedVideos().length;
  const step=(n,t,sub)=>`<div style="display:flex;gap:8px;align-items:baseline;margin-top:18px;padding-top:10px;border-top:1px solid var(--bd,#2a3344)"><span style="background:var(--acc);color:#fff;border-radius:50%;min-width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px">${n}</span><b>${t}</b> <span class=mut>${sub||''}</span></div>`;
  const dot=(ok,t)=>`<b style="color:${ok===true?'#22c55e':ok===false?'#e5484d':'#e5a000'}">${t}</b>`;
  const emailChip=ES.status?(st.ready?dot(true,`ready · ${(st.inboxes||[]).filter(i=>!i.paused).length} inboxes · ${st.capacity_left} sends left today`):dot(false,'not set up')):dot(null,'checking…');
@@ -1147,7 +1055,7 @@ function startCard(){const st=ES.status||{},w=st.window||SQ.win||{start_hour:9,e
   ${sqTable()}
   <details data-sec="auto" ${secOpen('auto')} style="margin-top:18px;padding-top:10px;border-top:1px solid var(--bd,#2a3344)"><summary><b>Automatic mode and settings</b> <span class=mut>run it all day, follow-ups, how HALCRUS emails are treated. Click to open or close.</span></summary>
    <div class="row" style="margin-top:6px"><button class="b ${autopilotOn()?'p':''}" id="so-fullauto" title="Turns on everything that lets it run without you">${autopilotOn()?'Full autopilot is ON (click to go back to approve-first)':'Turn on full autopilot'}</button> <span class=mut>${autopilotOn()?'It finds leads, makes videos, saves and schedules emails (videos that pass the automatic check are sent without waiting for you), uses contact forms first, follows up, and only asks you for CAPTCHAs and logins.':'One click: automatic top-up, auto-scheduling of emails (even for videos you did not watch), contact forms first with Template 1 as a fallback, follow-ups, and unsolved CAPTCHA forms fall back to email after 24 hours.'}</span></div>
-   <div class="row" style="margin-top:6px"><label><input type="checkbox" id="so-auto" ${S.settings.autoStart?'checked':''}> Keep going by itself while this page is open until about <input type="number" id="so-keep" min="1" max="7" value="${keepDays()}" style="width:48px"> days of emails are saved (drafts waiting plus scheduled; one day is what your inboxes may send today, ${dailyCap()}). Saved now: ${stockNow()} of ${stockGoal()}. It finds leads, makes videos and schedules more until it gets there.</label></div>
+   <div class="row" style="margin-top:6px"><label><input type="checkbox" id="so-auto" ${S.settings.autoStart?'checked':''}> Keep going by itself (the helper does it, even with the browser closed) until about <input type="number" id="so-keep" min="1" max="7" value="${keepDays()}" style="width:48px"> days of emails are saved (drafts waiting plus scheduled; one day is what your inboxes may send today, ${dailyCap()}). Saved now: ${stockNow()} of ${stockGoal()}. It finds leads, makes videos and schedules more until it gets there.</label></div>
    <div class="row" style="margin-top:4px"><label><input type="checkbox" id="so-ask" ${sendAuto()?'':'checked'}> I press Send myself (step 6). Notify me when</label> <input type="number" id="so-ready" min="1" max="60" value="${+S.settings.notifyReady||10}" style="width:56px"> <span>approved emails are ready. Untick to send automatically.</span></div>
    <div class="row" style="margin-top:4px"><label><input type="checkbox" id="so-fu" ${S.settings.autoFollowUps!==false?'checked':''}> Send follow-ups by itself: follow up 1 after 3 days, follow up 2 after 7, never to anyone who replied, asked to stop or bounced</label></div>
    <div class="row" style="margin-top:4px"><label><input type="checkbox" id="so-sendchk" ${S.settings.loomSendChecked?'checked':''}> Schedule videos that passed the automatic check even if I did not watch them. Off means those emails are saved as drafts and wait until you press "I watched them all, approve" in step 3.</label></div>
@@ -1159,70 +1067,49 @@ function startCard(){const st=ES.status||{},w=st.window||SQ.win||{start_hour:9,e
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-sq]');if(!b)return;const id=b.dataset.id;b.disabled=true;
  try{if(b.dataset.sq==='cancel')await metaApi('/queue/cancel',{id});else await metaApi('/queue/reschedule',{id})}catch(_){}
  await queueSync();if(tab=='ads')adsV()});
-setInterval(()=>{queueSync().then(()=>{if(tab=='ads'&&!SO.busy&&!LM.pipeBusy&&!ES.busy)adsV()})},60000);
-setTimeout(()=>{loomClean();loomSyncUploads();queueSync();hcStatus();loomStatus()},3000);
+setInterval(()=>{queueSync().then(()=>{if(tab=='ads'&&!ES.busy)adsV()})},60000);
+setTimeout(()=>{queueSync();hcStatus();loomStatus();loopPoll()},3000);
 /* ---------- Keep going by itself: no button press. Every 10 minutes (and when the page opens) it tops the pipeline up, with guards ---------- */
-async function notifyNeeds(title,message,key){try{await fetch(RUNNER+'/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,message,key,every:21600})})}catch(e){}}
-function autoStatusLine(){const g=S.settings;if(!g.autoStart||!g.startConfirmed)return '';let other='';try{const L=leadLock();if(L.id&&L.id!==TAB_ID&&otherTabs()>0)other='<div class="mut" style="margin-top:4px;color:#e5a000">'+otherTabs()+' other CRM tab'+(otherTabs()==1?' is':'s are')+' open in this browser (one may have opened by itself at login) and another one is running the automatic top-up, so this tab does not. Your changes sync between them. <button class="b" data-takeover="1">Run it in this tab instead</button></div>'}catch(e){}const w=g.autoWhy,beat=g.autoBeat||0,ago=t=>{const m=Math.round((Date.now()-t)/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
- const stale=beat&&Date.now()-beat>25*60000&&!SO.busy&&Date.now()>(g.autoStartAfter||0);
+/* ---------- The automatic top-up runs in the helper (tools/outreach_loop.py), with this page closed too. This shows why it is where it is. ---------- */
+function autoStatusLine(){const g=S.settings;if(!g.autoStart||!g.startConfirmed)return '';
+ if(!LOOP&&/not found|404/.test(HS.err||''))return '<div class="mut" style="margin-top:4px;color:#e5a000">Automatic top-up: the helper is running an older version that cannot run the loop. Restart it: <code>launchctl kickstart -k gui/$(id -u)/com.clipper.helper</code></div>';
+ if(!LOOP)return '<div class="mut" style="margin-top:4px;color:#e5a000">Automatic top-up: the helper is not answering, so nothing is running. It starts at login; if it does not, open Terminal and run tools/start_outreach.command.</div>';
+ if(LOOP.seeded===false)return '<div class="mut" style="margin-top:4px">Automatic top-up: waiting for this page to hand its leads and settings to the helper (it does that by itself within a few seconds of opening the CRM).</div>';
+ const w=LOOP.auto,beat=LOOP.beat||0,ago=t=>{const m=Math.round((Date.now()-t)/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
+ const silent=LOOP.alive_at&&Date.now()-LOOP.alive_at>5*60000;
  const tm=t=>new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
- return other+`<div class="mut" style="margin-top:4px">Automatic top-up: ${w?`<b>${esc(w.why)}</b>${w.until&&w.until>Date.now()?` Next try about ${tm(w.until)}.`:''} <span>(${ago(w.at)})</span>`:'no check yet.'} ${beat?`<span>Last checked ${ago(beat)}.</span>`:''}${stale?` <b style="color:#e5a000">This page has not checked for a while. Keep this tab open and in front now and then; Chrome can put background tabs to sleep (Settings, Performance, Memory Saver: add this site to the always-active list).</b>`:''}</div>`}
-async function autoKeep(){const g=S.settings;if(!g.autoStart||!g.startConfirmed||SO.busy||LM.pipeBusy||ES.busy)return;if(!isLeader())return;
- g.autoBeat=Date.now();   /* proof that this page is alive and checking */
- const why=(m,h)=>{g.autoWhy={at:Date.now(),why:m,until:h?Date.now()+h*3600e3:0};save();const ae=document.activeElement;if(tab=='ads'&&!(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)))adsV()};
- if(Date.now()<(g.autoStartAfter||0))return;
- const later=(h,m)=>{g.autoStartAfter=Date.now()+h*3600e3;if(m)SO.msg=m;why(m||'Waiting.',h)};
- try{await loadEmailStatus();if(!ES.status||!ES.status.ready)return why('Email is not set up or the helper is not answering.');
-  if(ES.status.paused&&ES.status.paused.meta)return why('The Meta campaign is paused (Settings).');
-  await queueSync();
-  await cformRepliesCheck(false);
-  if(g.autoFollowUps!==false){const f=await loomQueueFollowups();if(f)await queueSync()}
-  const look=(S.adLeads||[]).filter(l=>l.videoAuto&&!l.videoApproved&&!l.emailedAt&&!l.dnc&&!l.loomLink&&l.video&&l.video.ok).length,
-   stock0=stockNow(),need=stockGoal()-stock0;
-  if(need<=0)return why(`Goal reached: ${stock0} emails saved (${keepDays()} day${keepDays()==1?'':'s'}). It starts again when it drops below ${stockGoal()}.`);
-  if(look>=5){notifyNeeds('Videos need a look',`${look} videos did not pass the automatic check and are waiting for you in the CRM (Meta Ads tab). Nothing new is being made until you review them.`,'look');return later(1,`${look} videos need your look (step 3). Nothing new is made until you approve or remove them.`)}
-  await loomStatus();if(LM.connected===false){notifyNeeds('Loom needs you','Loom is not connected, so new videos cannot be uploaded. Open the CRM, Meta Ads tab, and press Connect Loom.','loom-login');return later(1,'Loom is not connected. Press Connect Loom (step 1).')}
-  why(`Working: ${stock0} of ${stockGoal()} emails saved, making more.`);
-  runBegin('Automatic top-up');const rr=await startOutreach(Math.min(10,need));runFinishFrom(rr);await queueSync();
-  if(rr&&rr.fatal)return later(1,'Stopped: '+String(rr.fatal).slice(0,140));
-  if(rr&&rr.adBlocked)return later(1,'The Meta Ad Library is not answering properly (likely rate limiting). Trying again in 1 hour.');
-  const stock1=stockNow();
-  if(stock1<=stock0){if(HC.connected===false)notifyNeeds('HALCRUS needs you','HALCRUS is not connected, so no new leads can be found. Open the CRM, Meta Ads tab, and press Connect HALCRUS.','hc-login');
-   later(3,rr&&rr.noLeads?'No usable leads left: HALCRUS had nothing new'+(HC.connected===false?' (it is not connected: press Connect HALCRUS)':'')+'. Trying again in 3 hours.':`That round saved no new emails (${(rr&&rr.rejected||[]).length} leads were skipped, ${rr&&rr.made||0} videos made). Trying again in 3 hours.`)}
-  else if(stock1<stockGoal()){why(`${stock1} of ${stockGoal()} saved. Starting the next round.`);setTimeout(autoKeep,20000)}   /* progress was made and there is still room: go again right away */
-  else why(`Goal reached: ${stock1} emails saved.`)
- }catch(e){why('Stopped by an error: '+String(e&&e.message||e).slice(0,140))}}
-setInterval(autoKeep,600000);setTimeout(autoKeep,30000);
+ return `<div class="mut" style="margin-top:4px">Automatic top-up: ${w?`<b>${esc(w.why)}</b>${w.until&&w.until>Date.now()?` Next try about ${tm(w.until)}.`:''} <span>(${ago(w.at)})</span>`:'no check yet.'} ${beat?`<span>Last checked ${ago(beat)}.</span>`:''} <span>It runs in the helper, so it keeps going with this page closed.</span>${LOOP.queued_requests?` <span>Your last press is queued behind "${esc(LOOP.busy||'the current step')}".</span>`:''}${silent?` <b style="color:#e5a000">The helper's loop has been silent for ${Math.round((Date.now()-LOOP.alive_at)/60000)} minutes. Restart it: <code>launchctl kickstart -k gui/$(id -u)/com.clipper.helper</code></b>`:''}${LOOP.error?` <span style="color:#e5a000">Last problem: ${esc(LOOP.error)}</span>`:''}</div>`}
+function autoKeep(){return loopAsk('keep')}   /* the helper decides when; this only wakes it */
 function loomWire(){const g=id=>document.getElementById(id),by=id=>(S.adLeads||[]).find(x=>x.id==id),sync=()=>{if(tab=='ads')adsV()};
  cformWire();
  if(g('so-fullauto'))g('so-fullauto').onclick=()=>{const on=autopilotOn();
   if(on){if(!confirm('Go back to approve-first? Videos will wait for your "I watched them all, approve" and emails will wait for you to press Send. Contact forms and the automatic top-up keep running.'))return;S.settings.loomSendChecked=false;S.settings.sendMode='ask';save();adsV();return}
   if(!confirm('Turn on full autopilot?\n\nThis lets the software run without you:\n• it keeps finding leads and making videos until two days of emails are saved\n• videos that pass the automatic check are scheduled and sent even if you did not watch them\n• a lead\'s contact form is used first (Loom message, or Template 1 if there are no Meta ads); email goes to leads without a form\n• follow-ups go out by themselves; unsolved CAPTCHA forms fall back to email after 24 hours\n\nIt only asks you for logins and CAPTCHAs. You can go back any time. Turn it on?'))return;
-  Object.assign(S.settings,AUTOPILOT);S.settings.autoStartAfter=0;save();adsV();setTimeout(autoKeep,2000)};
+  Object.assign(S.settings,AUTOPILOT);S.settings.autoStartAfter=0;save();adsV();hsFlush().then(autoKeep)};
  if(g('so-n')){g('so-lm').onclick=()=>{const b=g('lp-connect');if(b)b.click()};g('so-hc').onclick=()=>hcConnect();g('so-n').onchange=e=>{S.settings.startTarget=Math.max(1,Math.min(10,+e.target.value||10));save()};
-  g('so-auto').onchange=e=>{S.settings.autoStart=e.target.checked;if(e.target.checked&&!S.settings.startConfirmed){e.target.checked=false;S.settings.autoStart=false;alert('Press Start outreach once first; it asks the questions that decide what may be sent.');return}S.settings.autoStartAfter=0;save();if(e.target.checked)setTimeout(autoKeep,500)};
-  g('so-keep').onchange=e=>{S.settings.keepDays=Math.max(1,Math.min(7,+e.target.value||2));S.settings.autoStartAfter=0;save();sync();if(S.settings.autoStart)setTimeout(autoKeep,500)};
+  g('so-auto').onchange=e=>{S.settings.autoStart=e.target.checked;if(e.target.checked&&!S.settings.startConfirmed){e.target.checked=false;S.settings.autoStart=false;alert('Press Start outreach once first; it asks the questions that decide what may be sent.');return}S.settings.autoStartAfter=0;save();if(e.target.checked)hsFlush().then(autoKeep)};
+  g('so-keep').onchange=e=>{S.settings.keepDays=Math.max(1,Math.min(7,+e.target.value||2));S.settings.autoStartAfter=0;save();sync();if(S.settings.autoStart)hsFlush().then(autoKeep)};
   g('so-fu').onchange=e=>{S.settings.autoFollowUps=e.target.checked;save()};
-  g('so-ready').onchange=e=>{S.settings.notifyReady=Math.max(1,Math.min(60,+e.target.value||10));S.settings.readyNotified=0;save();readyCheck()};
+  g('so-ready').onchange=e=>{S.settings.notifyReady=Math.max(1,Math.min(60,+e.target.value||10));save()};
   g('so-send').onclick=()=>sendReadyNow();
-  g('so-sendchk').onchange=e=>{if(e.target.checked&&!confirm('Videos that pass the automatic check will be SENT in your sending hours even if you never watched them. The check reads the finished video back and compares it with the script, but it cannot judge how it looks. Turn it on?')){e.target.checked=false;return}S.settings.loomSendChecked=e.target.checked;save();adsV();if(e.target.checked&&S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)};
+  g('so-sendchk').onchange=e=>{if(e.target.checked&&!confirm('Videos that pass the automatic check will be SENT in your sending hours even if you never watched them. The check reads the finished video back and compares it with the script, but it cannot judge how it looks. Turn it on?')){e.target.checked=false;return}S.settings.loomSendChecked=e.target.checked;save();adsV();if(e.target.checked&&S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))};
   g('so-jitbit').onchange=e=>{S.settings.jitbitCheck=e.target.checked;save()};
   g('so-trust').onchange=e=>{S.settings.trustHalcrus=e.target.checked;save()};g('so-aicheck').onchange=e=>{S.settings.aiEmailCheck=e.target.checked;save()};
-  g('so-approve-all').onclick=()=>{const ls=unwatchedVideos();if(!ls.length)return;if(!confirm(`Approve ${ls.length} video${ls.length==1?'':'s'} as watched by you?`))return;ls.forEach(approveVideo);save();adsV();if(S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)};
-  g('so-finish').onclick=async()=>{if(RUN.state==='working'||SO.busy||LM.pipeBusy||ES.busy)return;runBegin('Upload to Loom and save drafts');runStep('Uploading approved videos to Loom and saving their drafts…');await loomPipeline(false);const m=LM.pipeMsg||'Done.';runEnd(/not connected|could not|Not scheduled|failed/i.test(m)?'warn':'ok',m)};
+  g('so-approve-all').onclick=()=>{const ls=unwatchedVideos();if(!ls.length)return;if(!confirm(`Approve ${ls.length} video${ls.length==1?'':'s'} as watched by you?`))return;ls.forEach(approveVideo);save();adsV();if(S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))};
+  g('so-finish').onclick=async()=>{await loopAsk('pipeline',{auto:false})};
   g('so-ask').onchange=e=>{if(!e.target.checked&&!confirm('Automatic mode schedules every approved email to send by itself in your sending hours, with no further question. Turn it on?')){e.target.checked=true;return}S.settings.sendMode=e.target.checked?'ask':'auto';save();sync()}}
  document.querySelectorAll('[data-lm-sel]').forEach(c=>c.onchange=()=>{LM.sel[c.dataset.lmSel]=c.checked;const n=loomCandidates().filter(l=>LM.sel[l.id]&&!l.loomLink).length,b=g('lm-make');if(b){b.textContent=`Make the videos for ticked leads (${Math.min(n,3)} of ${n}, 3 at a time)`;b.disabled=LM.busy||ES.busy||!n}});
 
  g('lp-show').onchange=e=>{S.settings.loomShow=e.target.checked;save()};
- g('lp-connect').onclick=async()=>{LM.msg='A Chrome window is opening. Log in to Loom there. It closes by itself when you are in.';sync();try{await helperJob('/loom/login',{},()=>{})}catch(e){}await loomStatus();LM.msg=LM.connected?'Loom is connected.':'Loom was not connected. Try again.';sync()};
+ g('lp-connect').onclick=async()=>{LM.msg='A Chrome window is opening. Log in to Loom there. It closes by itself when you are in.';sync();try{if(await helperWait('Connecting Loom.'))await helperJob('/loom/login',{},()=>{})}catch(e){}await loomStatus();LM.msg=LM.connected?'Loom is connected.':'Loom was not connected. Try again.';sync()};
  g('lp-run').onclick=()=>loomPipeline(false);
- g('lp-auto').onchange=e=>{if(e.target.checked&&!confirm('Hands-free mode: while this tab is open, every video you approve is uploaded to your Loom, saved as an email draft, and (if the second box is ticked) sent in your sending hours within your daily limits. Turn it on?')){e.target.checked=false;return}S.settings.loomAuto=e.target.checked;save();sync()};
+ g('lp-auto').onchange=e=>{if(e.target.checked&&!confirm('Hands-free mode: the helper (also with this tab closed) uploads every video you approve is uploaded to your Loom, saved as an email draft, and (if the second box is ticked) sent in your sending hours within your daily limits. Turn it on?')){e.target.checked=false;return}S.settings.loomAuto=e.target.checked;save();sync()};
  g('lp-autoappr').onchange=e=>{S.settings.videoAutoApprove=e.target.checked;save();sync()};
  g('lp-sendchecked').onchange=e=>{if(e.target.checked&&!confirm('Videos that pass the automatic check will be SENT in your sending hours even if you never watched them. The check reads the finished video back and compares it with the script, but it cannot judge how it looks. Turn it on?')){e.target.checked=false;return}S.settings.loomSendChecked=e.target.checked;save();sync()};
  g('lp-send').onchange=e=>{if(e.target.checked&&!confirm('Send the approved emails automatically in your sending hours? Only videos you ticked "I watched it, approve" on will ever be sent.')){e.target.checked=false;return}S.settings.loomAutoSend=e.target.checked;save();sync()};
  if(LM.connected===null)loomStatus().then(()=>sync());
  g('lm-voice').onchange=e=>{S.settings.adVoice=e.target.value;S.settings.videoName=undefined;save();sync()};g('lm-name').onchange=e=>{S.settings.videoName=e.target.value.trim();save()};g('lm-host').onchange=e=>{S.settings.videoHost=e.target.value;save()};
- document.querySelectorAll('[data-lm-ok]').forEach(c=>c.onchange=()=>{const l=by(c.dataset.lmOk);if(l){l.videoApproved=c.checked?Date.now():0;l.videoAutoApproved=0;save();if(c.checked)trackAppr(l,'ok');if(c.checked&&S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600);const b=g('lm-draft');if(b){const n=loomCandidates().filter(loomReady).length;b.textContent=`Save the Loom emails as drafts (${n} ready)`;b.disabled=LM.busy||ES.busy||!n}const st=c.closest('tr').querySelector('.lm-st');if(st&&!l.draftedAt)st.textContent=l.videoApproved?'ready':'watch it, then approve';sync()}});
+ document.querySelectorAll('[data-lm-ok]').forEach(c=>c.onchange=()=>{const l=by(c.dataset.lmOk);if(l){l.videoApproved=c.checked?Date.now():0;l.videoAutoApproved=0;save();if(c.checked)trackAppr(l,'ok');if(c.checked&&S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true));const b=g('lm-draft');if(b){const n=loomCandidates().filter(loomReady).length;b.textContent=`Save the Loom emails as drafts (${n} ready)`;b.disabled=LM.busy||ES.busy||!n}const st=c.closest('tr').querySelector('.lm-st');if(st&&!l.draftedAt)st.textContent=l.videoApproved?'ready':'watch it, then approve';sync()}});
  document.querySelectorAll('[data-lm-script]').forEach(a=>a.onclick=e=>{e.preventDefault();const l=by(a.dataset.lmScript);if(l&&l.video)alert(l.video.script||'')});
  const upd=()=>{const n=loomCandidates().filter(loomReady).length,b=g('lm-draft');if(b){b.textContent=`Save the Loom emails as drafts (${n} ready)`;b.disabled=LM.busy||ES.busy||!n}};
  document.querySelectorAll('[data-lm-ads]').forEach(i=>i.onchange=()=>{const l=by(i.dataset.lmAds);if(l){l.adsCount=+i.value||'';save()}});
@@ -1231,7 +1118,7 @@ function loomWire(){const g=id=>document.getElementById(id),by=id=>(S.adLeads||[
  document.querySelectorAll('[data-lm-copy]').forEach(b=>b.onclick=()=>{const[i,k]=b.dataset.lmCopy.split('|'),l=by(i);if(!l)return;navigator.clipboard.writeText(loomText(meta()[k],l)).catch(()=>{});b.textContent='Copied'});
  g('lm-make').onclick=async()=>{const todo=loomCandidates().filter(l=>LM.sel[l.id]&&!l.loomLink).slice(0,3);if(!todo.length)return;LM.busy=true;LM.msg='Working out who each video says Hey to…';sync();await metaGreet(todo);LM.msg=`Making ${todo.length} video(s). About 2 minutes each, in the background.`;sync();
   await helperJob('/ads/video',{items:todo.map(l=>({id:l.id,company:l.company,email:l.email,web:l.web||'',first:(l.greet&&l.greet.first)||l.company,business:(l.greet&&l.greet.business)||l.company})),voice:voiceSel(),narrator:narratorName(),product:meta().product,link:'https://portal.aiadsoptimization.com/signup',host:S.settings.videoHost||'loom'},t=>{const r=parseTag(t,'ADVIDEO');if(!r)return;const l=by(r.id);if(!l)return;if(r.transient){AD.lookupFail=(AD.lookupFail||0)+1;l.adRetry=Date.now();l.adTries=(l.adTries||0)+1;delete l.video;save();return}l.video={ok:r.ok,reason:r.reason,link:r.link,facts:r.facts,script:r.script,madeAt:Date.now()};if(r.ok&&r.display_name&&r.display_name.toLowerCase().replace(/[^a-z0-9]/g,'')!==String(l.company).toLowerCase().replace(/[^a-z0-9]/g,''))l.brandName=r.display_name;if(r.ok){l.strategy='loom';l.video.file=r.file;if(r.facts&&r.facts.active)l.adsCount=r.facts.active;if(r.ok){l.videoAuto=1;l.videoQa=r.qa||null;l.videoApproved=(r.qa&&r.qa.ok&&S.settings.videoAutoApprove!==false)?Date.now():0;l.videoAutoApproved=l.videoApproved?1:0;l.video.host=S.settings.videoHost||'loom';if(r.link&&l.video.host==='drive')l.loomLink=r.link}}save()});
-  const ok=todo.filter(l=>l.video&&l.video.ok).length;const auto=todo.filter(l=>l.video&&l.video.ok&&l.videoAutoApproved).length;LM.busy=false;LM.msg=`${ok} of ${todo.length} videos made${auto?`, ${auto} passed the automatic check and were approved`:''}.${ok-auto?' Watch the others and tick approve before drafting.':''} ${todo.filter(l=>l.video&&!l.video.ok).length?'Some leads were skipped, the reason is shown on the row.':''}`;LM.sel={};save();sync();if(S.settings.loomAuto)setTimeout(()=>loomPipeline(true),600)};
+  const ok=todo.filter(l=>l.video&&l.video.ok).length;const auto=todo.filter(l=>l.video&&l.video.ok&&l.videoAutoApproved).length;LM.busy=false;LM.msg=`${ok} of ${todo.length} videos made${auto?`, ${auto} passed the automatic check and were approved`:''}.${ok-auto?' Watch the others and tick approve before drafting.':''} ${todo.filter(l=>l.video&&!l.video.ok).length?'Some leads were skipped, the reason is shown on the row.':''}`;LM.sel={};save();sync();if(S.settings.loomAuto)hsFlush().then(()=>loomPipeline(true))};
  g('lm-prev').onclick=async()=>{const l=(S.adLeads||[]).find(x=>LM.sel[x.id]&&x.loomLink);if(!l){LM.msg='Tick a lead that has a Loom link first.';return sync()}await metaGreet([l]);
   try{const r=await metaApi('/email/preview',{leads:[metaPayload(l)],template:metaTemplateObj(),limit:1,step:0});const it=(r.items||[])[0];LM.pv=it&&it.status==='ready'?`To: ${it.to}\nSubject: ${it.subject}\n\n${it.body}`:'Skipped: '+(it?it.why:'no result');LM.msg=''}catch(e){LM.msg='Helper not running.'}sync()};
  g('lm-draft').onclick=async()=>{const todo=loomCandidates().filter(loomReady).slice(0,20);if(!todo.length)return;LM.busy=true;LM.msg='Working out who each email says Hey to…';sync();await metaGreet(todo);LM.msg=`Saving ${todo.length} Loom emails as drafts…`;sync();

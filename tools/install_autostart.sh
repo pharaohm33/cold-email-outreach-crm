@@ -1,7 +1,7 @@
 #!/bin/bash
 # Starts the helper by itself when you log in to this Mac, and restarts it if it ever stops.
 #   bash tools/install_autostart.sh            install (asks nothing; run it only when you want this)
-#   bash tools/install_autostart.sh --open-crm also open the CRM page at login (the "keep going by itself" loop runs in that page)
+#   bash tools/install_autostart.sh --open-crm also open the CRM page at login (optional: the loop runs in the helper now, the page is only a viewer/controller)
 #   bash tools/install_autostart.sh --print    show what would be written, change nothing
 #   bash tools/install_autostart.sh --remove   uninstall
 # It adds two small files in ~/Library/LaunchAgents (com.clipper.helper.plist, and com.clipper.crm.plist with --open-crm). Nothing else on the Mac is touched.

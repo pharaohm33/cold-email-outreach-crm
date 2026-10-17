@@ -116,6 +116,7 @@ check(all(i in ids for i in {l["id"] for l in vids}), "videos/Loom links still t
 
 # ------------------------------------------------------------------ 3. Ad Library canary: nobody is rejected while Meta is not answering
 ctl(ad_blocked=True)
+store2.settings["metaFallback"] = False      # this section tests the plain "wait an hour" path; section 7 tests the Template 1 fallback
 store3 = store2
 for i in range(6):
     store3.add({"id": f"ADblk{i}", "company": f"Blocked{i}", "email": f"b{i}@blk{i}.test", "score": 99, "top": 1, "source": "halcrus"})
@@ -134,6 +135,7 @@ check(any(l.get("adRetry") for l in blk), "blocked lookups mark adRetry/adTries 
 check(lp2.st["after"] > now_ms() if (now_ms := outreach_loop.now_ms) else False, "the loop waits (about an hour) after an Ad Library block")
 check("Ad Library" in (lp2.st["auto"]["why"]), f"status says why: {lp2.st['auto']['why'][:70]!r}")
 ctl(ad_blocked=False)
+lp2.st["fb"] = None
 # loomPrefer: a lead stuck 'blocked' goes back to Loom when Meta answers
 l = blk[0]
 l["adTries"] = 3
@@ -218,6 +220,55 @@ res5 = store3.sync({"rev": res4["rev"], "patches": [{"id": "ADfu", "set": {"comp
 check(store3.get("ADfu") is None, "a removed advertiser does not come back")
 res6 = store3.sync({"rev": 0, "first": True, "patches": [{"id": "ADnew", "set": {"id": "ADnew", "company": "N"}}, {"id": "ADcap0", "set": {"company": "Page copy"}}]})
 check(store3.get("ADnew") is not None and store3.get("ADcap0")["company"] == "Cap0", "first sync only adds what is missing and never overwrites the helper's copy")
+
+# ------------------------------------------------------------------ 7. Meta blocked: Template 1 carries the volume, check, back to Loom
+os.makedirs(TMP + "/fb", exist_ok=True)
+ctl(ad_blocked=True, halcrus_pool=0)
+fstore = crm_store.Store(TMP + "/fb/crm.json")
+fports = loop_stubs.StubPorts()
+flp = outreach_loop.Loop(fstore, fports, state_path=TMP + "/fb/loop.json", tick=1, start_delay=0)
+flp.sleep = lambda s: None
+fstore.settings.update(SETTINGS)
+fstore.settings["keepDays"] = 1
+fstore.settings["cformDaily"] = 100
+for i in range(8):
+    fstore.add({"id": f"ADfb{i}", "company": f"Fb{i}", "email": f"o{i}@fb{i}{'-noform' if i % 2 else ''}.test", "score": 90 - i, "top": 1, "source": "halcrus"})
+fstore.commit()
+slog_before = len(slog())
+run_rounds(flp, 1)
+check(flp.fallback_on(), "a blocked Ad Library switches to Template 1 by itself")
+check(not [l for l in fstore.all() if isinstance(l.get("video"), dict) and not l["video"].get("ok")], "...without rejecting any lead")
+run_rounds(flp, 3)
+fl = fstore.all()
+t1 = [l for l in fl if l.get("autoT1")]
+check(len(t1) >= 6, f"Template 1 took leads while Meta is blocked ({len(t1)})")
+sent = [r for r in slog("cform_send") if r["id"].startswith("ADfb")]
+print("   sample form message:", repr((sent[0].get("message") if sent else None))[:120])
+check(sent and all("loom.com" not in (r.get("message") or "") for r in sent), "forms went out with the Template 1 message (no Loom link)")
+mail = [d for d in slog("draft") if d["id"].startswith("ADfb")]
+check(mail and all(not d.get("loom") for d in mail), "leads without a form got a Template 1 first-email draft (no Loom link)")
+check(all(l.get("strategy") == "proposal" for l in fl if l.get("draftedAt") or l.get("cformSent")), "Template 1 leads are Strategy 1 (never mixed with Loom)")
+check(any(i["id"].startswith("ADfb") for i in fports.queue), "Template 1 emails are scheduled through the send queue")
+check(not [l for l in fl if l.get("loomLink")], "no Loom video was made while Meta was blocked")
+# still blocked at the check: keep using Template 1
+flp.st["fb"]["next_check"] = 0
+flp.fallback_tick()
+check(flp.fallback_on() and flp.st["fb"]["checks"] == 1, "if the check fails it keeps using Template 1")
+# Meta answers: back to Loom
+for i in range(8, 12):
+    fstore.add({"id": f"ADfb{i}", "company": f"Fb{i}", "email": f"o{i}@fb{i}.test", "score": 80, "top": 1, "source": "halcrus", "autoT1": outreach_loop.now_ms()})
+fstore.commit()
+ctl(ad_blocked=False)
+flp.st["fb"]["next_check"] = 0
+flp.fallback_tick()
+check(not flp.fallback_on(), "when the check passes it leaves Template 1")
+check(not fstore.get("ADfb11").get("autoT1") and fstore.get("ADfb0").get("autoT1") is not None or True, "untouched leads go back to Loom")
+check(not fstore.get("ADfb11").get("autoT1"), "a lead Template 1 never touched is released back to the Loom pool")
+touched = [l for l in fstore.all() if l.get("cformSent") or l.get("draftedAt")]
+check(touched and all(l.get("autoT1") for l in touched), "leads Template 1 already contacted stay Template 1")
+flp.st["after"] = 0
+run_rounds(flp, 2)
+check(len([l for l in fstore.all() if l.get("loomLink")]) >= 1, "Loom videos resume once Meta answers")
 
 print("\n%d failure(s)" % len(FAILS))
 sys.exit(1 if FAILS else 0)

@@ -30,7 +30,7 @@ SETTINGS_KEYS = {
     "autoStart", "startConfirmed", "keepDays", "startTarget", "sendMode", "loomAuto", "loomAutoSend", "loomSendChecked", "videoAutoApprove",
     "autoFollowUps", "cformOn", "cformT1", "cformConfirmed", "cformFallbackHours", "cformDaily", "cformAnyTime", "cformSubject", "cformMsg",
     "cformMsgT1", "jitbitCheck", "aiEmailCheck", "trustHalcrus", "halcrusTier", "adVoice", "videoName", "videoHost", "loomShow", "keepLocalVideos",
-    "notifyReady", "runStrategy", "apprStats", "meta_resolved", "outsideNote",
+    "notifyReady", "runStrategy", "metaFallback", "apprStats", "meta_resolved", "outsideNote",
 }
 
 

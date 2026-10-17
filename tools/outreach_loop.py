@@ -89,7 +89,7 @@ class Loop:
         self.alive_at = 0
         self.t_started = time.time()
         self.sleep = time.sleep
-        self.st = {"auto": None, "beat": 0, "after": 0, "health": {"at": 0, "v": None}, "cformRepAt": 0, "readyNotified": 0, "alerts": {}, "run": self._idle_run(),
+        self.st = {"fb": None, "auto": None, "beat": 0, "after": 0, "health": {"at": 0, "v": None}, "cformRepAt": 0, "readyNotified": 0, "alerts": {}, "run": self._idle_run(),
                    "pipeMsg": "", "cfMsg": "", "pipe_at": 0, "keep_at": 0, "last_pipeline": 0}
         self._load_state()
 
@@ -231,6 +231,8 @@ class Loop:
         v = l.get("video")
         if isinstance(v, dict) and not v.get("ok") and not re.search(r"^error|transient", v.get("reason") or "", re.I):
             return "no Meta ads"
+        if l.get("autoT1"):
+            return "Meta was blocking the Ad Library (Template 1 for now)"
         if l.get("adRetry") and (l.get("adTries") or 0) >= 2:
             return "the Ad Library stayed blocked"
         ine = l.get("ineligible")
@@ -298,13 +300,13 @@ class Loop:
             ine = l.get("ineligible")
             if (l.get("email") and not l.get("dnc") and not l.get("replied") and not l.get("contacted") and not l.get("emailedAt") and not l.get("loomSentAt") and not l.get("loomLink")
                     and not l.get("bounced") and not self.queued(l) and not l.get("removedAt") and not (isinstance(ine, dict) and t - (ine.get("at") or 0) < 6048e5)
-                    and self.strat_of(l) != "proposal" and not (isinstance(v, dict) and (v.get("ok") or v.get("madeAt")))):
+                    and self.strat_of(l) != "proposal" and not l.get("autoT1") and not (isinstance(v, dict) and (v.get("ok") or v.get("madeAt")))):
                 out.append(l)
         out.sort(key=lambda l: (0 if l.get("top") else 1, -jsnum(l.get("score"))))
         return out
 
     def stock_now(self):
-        return len([l for l in self.leads if self.strat_of(l) == "loom" and (l.get("draftedAt") or self.queued(l) or self.pending_form(l)) and not l.get("emailedAt") and not l.get("dnc")
+        return len([l for l in self.leads if (self.strat_of(l) == "loom" or l.get("autoT1")) and (l.get("draftedAt") or self.queued(l) or self.pending_form(l)) and not l.get("emailedAt") and not l.get("dnc")
                     and not l.get("removedAt") and not l.get("bounced") and not l.get("replied") and l.get("queueStatus") != "sent"])
 
     def daily_cap(self):
@@ -1168,6 +1170,134 @@ class Loop:
         finally:
             self.commit()
 
+    # ------------------------------------------------------------------ Meta blocked: keep the volume going with Template 1, check, go back to Loom
+    FB_CHECK_EVERY = 30 * 60      # seconds between "does the Ad Library answer again?" checks while Template 1 carries the volume
+
+    def fallback_enabled(self):
+        return self.g.get("metaFallback") is not False
+
+    def fallback_on(self):
+        return bool(self.st.get("fb"))
+
+    def enter_fallback(self, why="the Ad Library is not answering"):
+        """The Ad Library stopped answering: instead of waiting, the loop sends Template 1 (contact form first, else the plain first email) and re-checks Meta every 30 minutes."""
+        if not self.fallback_enabled() or self.fallback_on():
+            return False
+        self.st["fb"] = {"since": now_ms(), "next_check": time.time() + self.FB_CHECK_EVERY, "checks": 0, "why": why}
+        self.st["after"] = 0
+        self.st["keep_at"] = time.time() + 3
+        self.st["cfMsg"] = "Meta is not answering: Template 1 carries the volume until it does."
+        self.save_state()
+        return True
+
+    def exit_fallback(self):
+        """Meta answers again: leads that Template 1 has not touched yet go back to the Loom video; the ones already drafted, queued or sent stay Template 1 (never mixed)."""
+        n = 0
+        for l in self.leads:
+            if l.get("autoT1") and not (l.get("cformSent") or l.get("draftedAt") or l.get("emailedAt") or self.queued(l)):
+                l.pop("autoT1", None)
+                l.pop("adRetry", None)
+                l["adTries"] = 0
+                l.pop("t1Skip", None)
+                n += 1
+        self.st["fb"] = None
+        self.st["after"] = 0
+        self.st["keep_at"] = time.time() + 3
+        self.st["cfMsg"] = f"The Ad Library answers again: back to Loom videos ({n} lead(s) released from Template 1)."
+        self.commit()
+        self.save_state()
+
+    def fallback_tick(self):
+        fb = self.st.get("fb")
+        if not fb or time.time() < fb.get("next_check", 0):
+            return
+        try:
+            v = self.ports.ads_health()
+        except Exception:
+            v = None
+        fb["last_check"] = now_ms()
+        if v is True:
+            self.exit_fallback()
+        elif v is False:
+            fb["checks"] = fb.get("checks", 0) + 1
+            fb["next_check"] = time.time() + self.FB_CHECK_EVERY      # still blocked: keep using Template 1
+        else:
+            fb["next_check"] = time.time() + 300                       # the helper was busy: ask again soon
+        self.save_state()
+
+    def t1_email_step(self):
+        """Template 1 by email for fallback leads whose site has no usable contact form: first-email draft, then (automatic mode) a scheduled send."""
+        todo = [l for l in self.leads if l.get("autoT1") and self.cform_route(l) in ("email", "wait") and not l.get("draftedAt") and not self.queued(l) and not l.get("emailedAt")
+                and not l.get("dnc") and l.get("email") and not l.get("t1Skip") and not l.get("replied") and not l.get("bounced")][:10]
+        if todo:
+            self.greet(todo)
+
+            def on_line(t):
+                self.run_line(t)
+                r = parse_tag(t, "EMAIL")
+                if not r:
+                    return
+                l = self.store.get(r.get("id"))
+                if not l:
+                    return
+                if r.get("status") == "drafted":
+                    l["draftedAt"] = now_ms()
+                    l["strategy"] = l.get("strategy") or "proposal"
+                    l.pop("skipWhy", None)
+                elif r.get("status") == "skip":
+                    l["t1Skip"] = r.get("why") or "skipped"
+                    l["skipWhy"] = l["t1Skip"]
+                self.commit()
+            self.job(f"saving {len(todo)} Template 1 draft(s)", self.ports.email_drafts, [self.meta_payload(l) for l in todo], self.template_obj(), 10, on_line=on_line)
+            self.commit()
+        if self.send_auto():
+            q = [l for l in self.leads if l.get("autoT1") and l.get("draftedAt") and not l.get("emailedAt") and not self.queued(l) and not l.get("dnc")][:60]
+            if q:
+                try:
+                    r = self.ports.queue_add([{"id": l["id"], "to": l.get("email"), "company": l.get("brandName") or l.get("company"), "lead": self.meta_payload(l), "template": self.template_obj(),
+                                               "campaign": "meta", "step": 0} for l in q])
+                except Exception as e:
+                    self.st["pipeMsg"] = "Not scheduled: " + str(e)[:100]
+                    r = []
+                for x in r or []:
+                    l = self.store.get(x.get("id"))
+                    if l and x.get("status") == "scheduled":
+                        l["queueStatus"] = "scheduled"
+                        l["sendDue"] = x.get("due_at")
+                    elif l and x.get("status") == "skipped":
+                        l["skipWhy"] = x.get("why")
+                self.commit()
+                self.queue_sync()
+
+    def t1_round(self, need):
+        """One round of the fallback: take fresh leads (no video), check their emails, hand them to Template 1; the pipeline sends forms, the email step drafts and schedules the rest."""
+        say = self.run_step
+        target = int(max(1, min(25, need)))
+        taken, no_hc = 0, False
+        pool = self.start_pool()
+        if len(pool) < target * 2:
+            say(f"Only {len(pool)} lead(s) ready, looking for more in HALCRUS…")
+            got = self.halcrus_more(max(20, target * 4))
+            no_hc = got < 0 or got == 0
+            say("HALCRUS is not connected; continuing with the leads I have." if got == -1 else f"Added {max(got, 0)} new lead(s) from HALCRUS.")
+            pool = self.start_pool()
+        probe = pool[:target * 2]
+        if any(l.get("email") and not (isinstance(l.get("emailCheck"), dict) and l["emailCheck"].get("at")) for l in probe):
+            say(f"Checking {len(probe)} email(s) before sending Template 1…")
+            self.check_lead_emails(probe)
+            pool = self.start_pool()
+        batch = pool[:target]
+        for l in batch:
+            l["autoT1"] = now_ms()
+        self.greet(batch)
+        self.commit()
+        taken = len(batch)
+        say(f"Template 1 for {taken} lead(s): contact forms first, then the plain first email…")
+        self.pipeline(True)
+        self.t1_email_step()
+        self.commit()
+        return {"taken": taken, "noLeads": taken == 0}
+
     # ------------------------------------------------------------------ the automatic top-up (autoKeep)
     def why(self, msg, hours=0):
         self.st["auto"] = {"at": now_ms(), "why": msg, "until": now_ms() + int(hours * 3600e3) if hours else 0}
@@ -1200,12 +1330,25 @@ class Loop:
             if g.get("autoFollowUps") is not False:
                 if self.loom_queue_followups():
                     self.queue_sync()
+            self.fallback_tick()
             look = len([l for l in self.leads if l.get("videoAuto") and not l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("loomLink") and isinstance(l.get("video"), dict) and l["video"].get("ok")])
             stock0 = self.stock_now()
             coming = self.pipeline_backlog()     # videos made or on Loom that the pipeline is still turning into drafts, scheduled emails or form messages
             need = self.stock_goal() - stock0 - coming
             if need <= 0:
                 return self.why(f"Goal reached: {stock0} emails saved{f' and {coming} on their way' if coming else ''} ({self.keep_days()} day{'' if self.keep_days() == 1 else 's'}). It starts again when it drops below {self.stock_goal()}.")
+            if self.fallback_on():       # Meta is blocking the Ad Library: Template 1 keeps the volume up until it answers again
+                fb = self.st["fb"]
+                nxt = time.strftime("%-I:%M %p", time.localtime(fb.get("next_check", 0)))
+                self.why(f"Meta is blocking the Ad Library, so Template 1 (contact form first, then the plain email) carries the volume. {stock0} of {self.stock_goal()} saved. Next Meta check about {nxt}; Loom videos resume as soon as it answers.")
+                self.run_begin("Automatic top-up (Template 1: Meta is blocking the Ad Library)")
+                rr = self.t1_round(min(25, need))
+                self.run_end("ok" if rr["taken"] else "warn", f"Template 1: {rr['taken']} lead(s) taken. Loom resumes when Meta answers (next check about {nxt})." if rr["taken"] else "No usable leads for Template 1 right now.")
+                self.queue_sync()
+                if rr["noLeads"]:
+                    return self.later(1, "Meta is blocking the Ad Library and there are no usable leads for Template 1 right now. Trying again in 1 hour.")
+                self.st["keep_at"] = time.time() + 60
+                return
             if look >= 5:
                 self.alert("Videos need a look", f"{look} videos did not pass the automatic check and are waiting for you in the CRM (Meta Ads tab). Nothing new is being made until you review them.", "look")
                 return self.later(1, f"{look} videos need your look (step 3). Nothing new is made until you approve or remove them.")
@@ -1224,6 +1367,8 @@ class Loop:
             if rr.get("adBlocked"):
                 if not self.meta_connected():
                     self.alert("Meta Ad Library needs you", "Meta is not answering Ad Library searches from this Mac (it says \"No ads match\" even for Nike). Open the CRM, Meta Ads tab, step 1, and press Connect Meta to log in to Facebook once; until then it retries every hour.", "meta-blocked", 12 * 3600)
+                if self.enter_fallback("the Ad Library is not answering"):
+                    return self.why("The Meta Ad Library is not answering. Switching to Template 1 now (contact form first, then the plain email); it checks Meta every 30 minutes and goes back to Loom videos as soon as it answers.")
                 return self.later(1, "The Meta Ad Library is not answering properly (likely rate limiting). Trying again in 1 hour.")
             stock1 = self.stock_now()
             if stock1 <= stock0 and not rr.get("made"):
@@ -1265,7 +1410,10 @@ class Loop:
         if k == "run":
             self.st["after"] = 0
             self.run_begin("Loom videos")
-            self.finish_from(self.start_outreach(r.get("count")))
+            rr = self.start_outreach(r.get("count"))
+            self.finish_from(rr)
+            if rr.get("adBlocked"):
+                self.enter_fallback("the Ad Library is not answering")
             if self.g.get("autoStart"):
                 self.st["keep_at"] = time.time() + 15
         elif k == "pipeline":
@@ -1371,7 +1519,7 @@ class Loop:
         return out, t1
 
     def channel_stats(self):
-        leads = [l for l in self.leads if self.strat_of(l) == "loom" or l.get("cformSent")]
+        leads = [l for l in self.leads if self.strat_of(l) == "loom" or l.get("cformSent") or l.get("autoT1")]
 
         def sent_form(l):
             cs = l.get("cformSent")
@@ -1401,7 +1549,7 @@ class Loop:
             out = {"ok": True, "now": now_ms(), "alive_at": int(self.alive_at * 1000), "started_at": int(self.t_started * 1000), "busy": self.busy_now, "auto": self.st.get("auto"), "beat": self.st.get("beat"),
                    "after": self.st.get("after"), "run": self.st.get("run"), "pipeMsg": self.st.get("pipeMsg"), "cfMsg": self.st.get("cfMsg"), "stock": stock,
                    "loom": self.loom_connected, "halcrus": self.hc_connected, "meta": self.meta_connected(), "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
-                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings)}
+                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb")}
             if not light:
                 out["routes"], out["t1"] = self.routes()
                 out["stats"] = self.channel_stats()

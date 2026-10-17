@@ -28,3 +28,8 @@ tools/halcrus_session.json
 tools/halcrus_state.json
 tools/send_queue.json
 tools/loom_uploads.json
+
+# contact form sender: screenshots of other people's websites, who was messaged, alert preferences
+tools/contact_form_debug/
+tools/contact_form_log.jsonl
+tools/notify_prefs.json

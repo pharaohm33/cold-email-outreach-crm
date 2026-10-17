@@ -1327,7 +1327,14 @@ class Loop:
             return
         self.pipeline(True)
 
+    def _heartbeat(self, th):
+        """A long job (making videos takes minutes) keeps the loop thread busy, so it cannot stamp alive_at itself: this does, as long as that thread lives."""
+        while th.is_alive():
+            self.alive_at = time.time()
+            time.sleep(10)
+
     def run_forever(self):
+        threading.Thread(target=self._heartbeat, args=(threading.current_thread(),), daemon=True).start()
         time.sleep(self.start_delay)
         self.st["keep_at"] = max(self.st.get("keep_at", 0), time.time())
         while True:

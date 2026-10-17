@@ -342,6 +342,42 @@ def _cookie_banner(pg):
             pass
 
 
+def _dismiss_popups(pg):
+    """Discount / newsletter pop-ups cover the page and swallow clicks. Close them the way a visitor would."""
+    try:
+        pg.keyboard.press("Escape")
+    except Exception:
+        pass
+    for sel in ("button:has-text('No thanks')", "a:has-text('No thanks')", "button:has-text('No, thanks')", "[aria-label='Close']:visible", "button[aria-label*='lose']:visible", "button:has-text('Maybe later')", "button:has-text('Dismiss')"):
+        try:
+            pg.locator(sel).first.click(timeout=600)
+        except Exception:
+            pass
+
+
+def _page_text(pg):
+    """All the text a visitor could see: the page, its frames, and hidden-but-present text."""
+    out = []
+    for fr in pg.frames:
+        for js in ("document.body ? document.body.innerText : ''", "document.documentElement ? document.documentElement.textContent : ''"):
+            try:
+                out.append(fr.evaluate(js) or "")
+            except Exception:
+                pass
+    return "\n".join(out)
+
+
+def _form_closed(root):
+    """After sending, most forms disappear or empty their message box."""
+    try:
+        if not root.is_visible():
+            return True
+        ta = root.locator("textarea").first
+        return ta.count() > 0 and (ta.input_value() or "").strip() == ""
+    except Exception:
+        return True
+
+
 def fill_form(pg, values):
     """Finds the contact form on the loaded page and fills it in WITHOUT sending it.
     Returns {ok, root, btn, form, captcha} or {ok: False, status, note} (status 'needs_human' or 'failed')."""
@@ -398,52 +434,67 @@ def fill_form(pg, values):
 
 
 def _confirmed(pg, before):
-    try:
-        body = pg.inner_text("body")
-    except Exception:
-        body = ""
+    body = _page_text(pg)
     return bool(SUCCESS.search(body) or (re.search(r"thank|success|sent|confirm", pg.url, re.I) and pg.url != before))
 
 
 def submit(url, values, confirm=False, show=False, log=print):
     """Fills the form at `url` with values {name,email,phone,subject,message,company,website} and presses its send button.
-    Returns {status: 'sent' | 'unsure' | 'failed' | 'needs_human', note}. Does nothing unless confirm is True."""
+    Returns {status: 'sent' | 'unsure' | 'failed' | 'needs_human', note, shot}. Does nothing unless confirm is True."""
     if not confirm:
         return {"status": "failed", "note": "not confirmed"}
     from playwright.sync_api import sync_playwright
     DEBUG.mkdir(exist_ok=True)
+    stamp = str(int(time.time()))
     with sync_playwright() as p:
         b = _ctx(p, show)
         try:
             pg = b.new_context(viewport={"width": 1280, "height": 900}, user_agent=UA, locale="en-US").new_page()
             pg.goto(url, wait_until="domcontentloaded", timeout=30000)
-            pg.wait_for_timeout(3000)
+            pg.wait_for_timeout(3500)
             _cookie_banner(pg)
+            _dismiss_popups(pg)
             r = fill_form(pg, values)
             if not r["ok"]:
                 return {"status": r["status"], "note": r["note"]}
             if r["captcha"] == "visible":
                 return {"status": "needs_human", "note": "the form has a CAPTCHA"}
+            _dismiss_popups(pg)
             before = pg.url
-            pg.screenshot(path=str(DEBUG / f"before_{int(time.time())}.png"))
-            r["btn"].click(timeout=6000)
-            end = time.time() + 14
+            pg.screenshot(path=str(DEBUG / f"before_{stamp}.png"))
+            try:
+                r["btn"].click(timeout=6000, no_wait_after=True)   # no_wait_after: a slow server must not make the click look like a failure
+            except Exception:
+                if pg.url == before and r["root"].count() > 0:   # nothing was sent: a pop-up is probably over the button. Close it and press once more
+                    _dismiss_popups(pg)
+                    r["btn"].click(timeout=6000, force=True, no_wait_after=True)
+            shot = f"after_{stamp}.png"
+            end, closed_since = time.time() + 32, None
             while time.time() < end:
-                pg.wait_for_timeout(700)
+                pg.wait_for_timeout(800)
                 if _confirmed(pg, before):
-                    pg.screenshot(path=str(DEBUG / f"after_{int(time.time())}.png"))
-                    return {"status": "sent", "note": "the page confirmed the message was sent"}
+                    pg.screenshot(path=str(DEBUG / shot))
+                    return {"status": "sent", "note": "the page confirmed the message was sent", "shot": shot}
                 try:
                     if pg.locator("iframe[src*=bframe], iframe[src*=hcaptcha]").first.is_visible():
-                        return {"status": "needs_human", "note": "a CAPTCHA appeared after pressing send"}
+                        pg.screenshot(path=str(DEBUG / shot))
+                        return {"status": "needs_human", "note": "a CAPTCHA appeared after pressing send", "shot": shot}
                 except Exception:
                     pass
-            pg.screenshot(path=str(DEBUG / f"unsure_{int(time.time())}.png"))
+                if _form_closed(r["root"]):
+                    closed_since = closed_since or time.time()
+                    if time.time() - closed_since > 3:   # the form went away and stayed away: that is what a sent form does
+                        pg.screenshot(path=str(DEBUG / shot))
+                        return {"status": "sent", "note": "the form closed after sending", "shot": shot}
+                else:
+                    closed_since = None
+            shot = f"unsure_{stamp}.png"
+            pg.screenshot(path=str(DEBUG / shot))
             try:
                 invalid = pg.locator("[aria-invalid=true], .error, .wpcf7-not-valid-tip, .field_error").count()
             except Exception:
                 invalid = 0
-            return {"status": "failed" if invalid else "unsure", "note": "the form showed errors" if invalid else "pressed send but no confirmation appeared (see tools/contact_form_debug)"}
+            return {"status": "failed" if invalid else "unsure", "note": "the form showed errors" if invalid else "pressed send but no confirmation appeared", "shot": shot}
         finally:
             b.close()
 
@@ -470,6 +521,7 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     pg.goto(it["url"], wait_until="domcontentloaded", timeout=30000)
                     pg.wait_for_timeout(2500)
                     _cookie_banner(pg)
+                    _dismiss_popups(pg)
                     r = fill_form(pg, {**values, "message": it.get("message", "")})
                 except Exception as e:
                     r = {"ok": False, "status": "failed", "note": str(e).splitlines()[0][:100]}
@@ -499,7 +551,7 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                             elif time.time() - t["pressed_at"] > 25:
                                 done = {"status": "unsure", "note": "send was pressed but no confirmation appeared"}
                         elif pg.evaluate(SOLVED_JS, None):
-                            t["btn"].click(timeout=5000)   # the CAPTCHA was solved by you: press the form's own send button
+                            t["btn"].click(timeout=5000, no_wait_after=True)   # the CAPTCHA was solved by you: press the form's own send button
                             t["pressed"], t["pressed_at"] = True, time.time()
                         elif time.time() - t["t0"] > wait_minutes * 60:
                             done = {"status": "later", "note": f"not solved within {wait_minutes} minutes, saved for later"}

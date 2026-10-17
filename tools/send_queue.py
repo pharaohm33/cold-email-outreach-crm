@@ -298,7 +298,7 @@ def scan_replies(campaign="meta"):
     if not first:
         return []
     res = cold_email.check_replies([{"id": to, "email": to, "since_ts": ts, "name": ""} for to, ts in first.items()], log_fn=lambda m: None, campaign=campaign)
-    return [{"email": f["email"], "kind": f["kind"], "snippet": f.get("snippet", "")} for f in res.get("found", []) if f["email"].lower() not in done]
+    return [{"email": f["email"], "kind": f["kind"], "snippet": f.get("snippet", "")} for f in res.get("found", []) if f["email"].lower() not in done and f.get("kind") != "auto"]
 
 
 def prune():

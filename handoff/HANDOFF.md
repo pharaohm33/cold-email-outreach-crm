@@ -105,6 +105,12 @@ By hand, once per computer: in the CRM press "Connect Loom" and log in (the help
 ## Step 4 buttons when the helper is busy (Oct 17)
 - The helper runs one job at a time. A click on the step 4 buttons used to be refused (HTTP 409) with no message while an upload or video run was going. Now helperWait() waits for the running job and shows "The helper is busy with <job>, waiting for it to finish…" in the card, then runs; disabled buttons have a tooltip saying why.
 
+## Glitchy forms, automatic vs human replies, forms any time (Oct 17)
+- Contact form sender (contact_form.submit): the Jones Sports form WAS sent but reported "unsure" (slow site, a 10%-off pop-up on top). Now: pop-ups are closed before and after filling (Escape, "No thanks", close buttons), the click uses no_wait_after (a slow server no longer makes it look like a failure), it waits up to 32 s, treats a form that closes and stays closed as sent, reads all text including frames and hidden text, and keeps a screenshot (the card shows "see what happened", served by the helper at /cform/shot?f=). A pending 'unsure' becomes 'sent' when the company's automatic reply arrives.
+- Replies: cold_email._reply_class() sorts a reply into a person or an automatic one (out of office, "we received your message", ticket mails, no-reply robots) from headers (Auto-Submitted, Precedence ...), the sender, the subject and the first lines. check_replies and the form replies check prefer a person's newest answer over a robot's; a robot's answer is only noted (log status 'autoreply'; page l.autoReply / l.cformAuto), never stops follow-ups, never adds to the do-not-contact list, never alerts the phone and is not counted as a reply; the KPIs show "N automatic reply only" separately and "people only" reply rates.
+- Forms outside sending hours: step 4 button "Allow forms outside sending hours: ON/OFF" (S.settings.cformAnyTime). The headless sender never opens a window; only the CAPTCHA batch is visible.
+- Loom upload: if no new video shows up in the library after about 2 minutes the upload is tried once more (the Icecartel upload had silently not started twice); rename waits longer (Loom is still processing right after an upload).
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

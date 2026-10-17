@@ -817,8 +817,20 @@ def cform_replies(items):
                 ids = data[0].split() if typ == "OK" and data and data[0] else []
                 if not ids:
                     continue
-                typ, raw = imap.fetch(ids[-1], "(BODY.PEEK[]<0.30000>)")
-                text, _msgid, _subj = cold_email._reply_text(raw[0][1] if raw and raw[0] else b"")
+                pick = None   # a person's answer beats an automatic one ("we received your message", out of office)
+                for mid in reversed(ids[-6:]):
+                    typ, raw = imap.fetch(mid, "(BODY.PEEK[]<0.30000>)")
+                    rb = raw[0][1] if raw and raw[0] else b""
+                    cls, sub = cold_email._reply_class(rb)
+                    if pick is None or (pick[1] == "auto" and cls == "human"):
+                        pick = (rb, cls, sub)
+                    if cls == "human":
+                        break
+                rb, cls, sub = pick
+                text = cold_email._reply_text(rb)[0]
+                if cls == "auto":
+                    found[it["id"]] = {"id": it["id"], "kind": "auto", "subtype": sub, "snippet": re.sub(r"\s+", " ", text)[:160]}
+                    continue
                 kind = "optout" if cold_email.OPT_OUT.search(text) else "replied"
                 if kind == "optout" and it.get("email"):
                     cold_email.suppress(it["email"], "asked to stop (contact form reply)")
@@ -1144,6 +1156,19 @@ class H(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "phone": phone_ready(), "running": STATE["running"], "lines": len(STATE["log"]),
                              "configured": bool(os.getenv("CRM_SYNC_URL") and os.getenv("CRM_SYNC_PASSWORD")), "phone": phone_ready(),
                              "yt": bool(os.getenv("YT_API_KEY"))})
+        elif u.path == "/cform/shot":   # a screenshot kept by the contact form sender (only files from its own folder)
+            name = os.path.basename(parse_qs(u.query).get("f", [""])[0])
+            f = HERE / "contact_form_debug" / name
+            if name.endswith(".png") and f.is_file():
+                data = f.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            return self._send(404, {"error": "no such screenshot"})
         elif u.path == "/awake":
             self._send(200, awake_status())
         elif u.path == "/clipper/templates":

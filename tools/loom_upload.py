@@ -153,7 +153,7 @@ def _rename(page, title, log):
     """Gives the video a clean title. Loom may still be processing the video and then offers an AI title, so it tries a few times, checks the title really changed, and
     leaves Loom's own title if it never works."""
     short = re.sub(r"\s+", " ", title).strip()
-    for attempt in range(5):
+    for attempt in range(12):
         try:
             btn = page.get_by_role("button", name=re.compile(r"^Rename video", re.I)).first
             btn.click(timeout=4000)
@@ -289,42 +289,46 @@ def upload_and_comment(video, title, comment, show=False, log=print):
                 else:
                     _open_library(page)
                     before = set(_share_links(page))  # Loom renames uploads on its own (an AI title), so the new video is found as the card that was not there before
-                    log("  opening the upload box")
-                    page.get_by_role("button", name=re.compile(r"^New video$", re.I)).first.click(timeout=8000)
-                    page.wait_for_timeout(600)
-                    try:
-                        page.get_by_text(re.compile(r"Upload a video", re.I)).first.click(timeout=4000)
-                    except Exception:
-                        pass
-                    page.wait_for_selector("input.uppy-Dashboard-input", state="attached", timeout=10000)
-                    page.locator("input.uppy-Dashboard-input").first.set_input_files(str(staged))
-                    page.wait_for_timeout(1500)
-                    for pat in (r"^Upload (1 )?file", r"^Upload$", r"^Start upload", r"^Done$"):  # the dialog may need a confirm click
+                    for attempt in (1, 2):   # Loom sometimes does not start an upload: one more try when no new video shows up
+                        log("  opening the upload box" + (" (second try)" if attempt == 2 else ""))
+                        page.get_by_role("button", name=re.compile(r"^New video$", re.I)).first.click(timeout=8000)
+                        page.wait_for_timeout(600)
                         try:
-                            page.get_by_role("button", name=re.compile(pat, re.I)).first.click(timeout=2500)
-                            break
+                            page.get_by_text(re.compile(r"Upload a video", re.I)).first.click(timeout=4000)
                         except Exception:
-                            continue
-                    log("  uploading; waiting for it to appear in the library")
-                    for i in range(48):  # up to about 6 minutes
-                        if CANCEL.is_set():
-                            return {"ok": False, "error": "stopped by you"}
-                        page.wait_for_timeout(4500)
-                        try:
-                            page.goto(LIBRARY, wait_until="domcontentloaded")
-                            page.wait_for_timeout(2500)
-                        except Exception:
-                            continue
-                        link = _find_card_link(page, token)
-                        if not link:
-                            new = [l for l in _share_links(page) if l not in before]
-                            link = new[0] if new else ""
+                            pass
+                        page.wait_for_selector("input.uppy-Dashboard-input", state="attached", timeout=10000)
+                        page.locator("input.uppy-Dashboard-input").first.set_input_files(str(staged))
+                        page.wait_for_timeout(1500)
+                        for pat in (r"^Upload (1 )?file", r"^Upload$", r"^Start upload", r"^Done$"):  # the dialog may need a confirm click
+                            try:
+                                page.get_by_role("button", name=re.compile(pat, re.I)).first.click(timeout=2500)
+                                break
+                            except Exception:
+                                continue
+                        log("  uploading; waiting for it to appear in the library")
+                        for i in range(24 if attempt == 1 else 48):  # about 2 minutes the first time, about 6 the second
+                            if CANCEL.is_set():
+                                return {"ok": False, "error": "stopped by you"}
+                            page.wait_for_timeout(4500)
+                            try:
+                                page.goto(LIBRARY, wait_until="domcontentloaded")
+                                page.wait_for_timeout(2500)
+                            except Exception:
+                                continue
+                            link = _find_card_link(page, token)
+                            if not link:
+                                new = [l for l in _share_links(page) if l not in before]
+                                link = new[0] if new else ""
+                            if link:
+                                break
                         if link:
                             break
-                        if i == 12:
-                            _snap(page, "upload_waiting")
+                        _snap(page, f"upload_not_found_{attempt}")
+                        if attempt == 1:
+                            log("  (nothing appeared in the library, trying the upload once more)")
+                            _open_library(page)
                     if not link:
-                        _snap(page, "upload_not_found")
                         return {"ok": False, "error": "the upload did not show up in your Loom library in time (see tools/loom_debug)"}
                     _remember(token, link)  # from here on the video is on Loom: its link is kept whatever happens next
                     log("  uploaded: " + link)

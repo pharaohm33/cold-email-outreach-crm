@@ -1399,7 +1399,7 @@ class H(BaseHTTPRequestHandler):
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})
             kind = str(body.get("kind") or "")
-            if kind not in ("run", "pipeline", "forms_find", "forms_send", "replies", "captcha", "send_ready", "keep"):
+            if kind not in ("run", "pipeline", "forms_find", "forms_send", "replies", "captcha", "send_ready", "keep", "meta_check", "mode"):
                 return self._send(400, {"error": "unknown request"})
             if kind in ("run", "forms_send", "captcha", "send_ready") and body.get("confirm") is not True:
                 return self._send(400, {"error": "needs confirm: true"})

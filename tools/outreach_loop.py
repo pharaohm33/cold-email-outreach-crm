@@ -89,7 +89,7 @@ class Loop:
         self.alive_at = 0
         self.t_started = time.time()
         self.sleep = time.sleep
-        self.st = {"fb": None, "auto": None, "beat": 0, "after": 0, "health": {"at": 0, "v": None}, "cformRepAt": 0, "readyNotified": 0, "alerts": {}, "run": self._idle_run(),
+        self.st = {"meta_ok": None, "fb": None, "auto": None, "beat": 0, "after": 0, "health": {"at": 0, "v": None}, "cformRepAt": 0, "readyNotified": 0, "alerts": {}, "run": self._idle_run(),
                    "pipeMsg": "", "cfMsg": "", "pipe_at": 0, "keep_at": 0, "last_pipeline": 0}
         self._load_state()
 
@@ -332,8 +332,11 @@ class Loop:
 
     def pipeline_backlog(self):
         """Leads whose video is made (or on Loom) but whose draft / scheduled send / form message does not exist yet: they will become stock."""
-        return len([l for l in self.leads if l.get("videoAuto") and l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("removedAt") and not l.get("draftedAt")
+        loom = len([l for l in self.leads if l.get("videoAuto") and l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("removedAt") and not l.get("draftedAt")
                     and not self.queued(l) and self.cform_route(l) not in ("form-done", "human", "form-auto")])
+        t1 = len([l for l in self.leads if l.get("autoT1") and not l.get("t1Skip") and not l.get("emailedAt") and not l.get("dnc") and not l.get("removedAt") and not l.get("draftedAt")
+                  and not self.queued(l) and self.cform_route(l) not in ("form-done", "human", "form-auto")])
+        return loom + t1
 
     def send_auto(self):
         return self.g.get("sendMode") == "auto"
@@ -656,6 +659,8 @@ class Loop:
             s = self.loom_queue_approved(False)
         else:
             self.ready_check()
+        if auto and self.send_auto():
+            self.t1_queue()
         if u or d or s:
             say(f"Uploaded {u}, saved {d} draft(s)" + (f", scheduled {s} to send" if auto and self.g.get("loomAutoSend") else "") + ".")
         elif not up and not self.loom_to_draft() and not (auto and self.loom_to_send_base(False)):
@@ -1173,17 +1178,24 @@ class Loop:
     # ------------------------------------------------------------------ Meta blocked: keep the volume going with Template 1, check, go back to Loom
     FB_CHECK_EVERY = 30 * 60      # seconds between "does the Ad Library answer again?" checks while Template 1 carries the volume
 
+    def template_mode(self):
+        """'auto' (Template 1 while Meta blocks this IP's Ad Library searches, Loom when it answers) | 'loom' (Loom only, wait when blocked) | 't1' (Template 1 only)."""
+        m = self.g.get("templateMode")
+        if m in ("auto", "loom", "t1"):
+            return m
+        return "loom" if self.g.get("metaFallback") is False else "auto"
+
     def fallback_enabled(self):
-        return self.g.get("metaFallback") is not False
+        return self.template_mode() != "loom"
 
     def fallback_on(self):
         return bool(self.st.get("fb"))
 
-    def enter_fallback(self, why="the Ad Library is not answering"):
+    def enter_fallback(self, why="the Ad Library is not answering", forced=False):
         """The Ad Library stopped answering: instead of waiting, the loop sends Template 1 (contact form first, else the plain first email) and re-checks Meta every 30 minutes."""
         if not self.fallback_enabled() or self.fallback_on():
             return False
-        self.st["fb"] = {"since": now_ms(), "next_check": time.time() + self.FB_CHECK_EVERY, "checks": 0, "why": why}
+        self.st["fb"] = {"since": now_ms(), "next_check": time.time() + self.FB_CHECK_EVERY, "checks": 0, "why": why, "forced": forced}
         self.st["after"] = 0
         self.st["keep_at"] = time.time() + 3
         self.st["cfMsg"] = "Meta is not answering: Template 1 carries the volume until it does."
@@ -1207,15 +1219,47 @@ class Loop:
         self.commit()
         self.save_state()
 
+    def apply_mode(self):
+        """The person's template switch: t1 = always Template 1, loom = never fall back, auto = follow the Ad Library on this IP."""
+        mode, fb = self.template_mode(), self.st.get("fb")
+        if mode == "t1" and not fb:
+            self.enter_fallback("you chose Template 1 only", forced=True)
+        elif mode == "t1" and fb and not fb.get("forced"):
+            fb["forced"] = True
+            fb["why"] = "you chose Template 1 only"
+            self.save_state()
+        elif fb and fb.get("forced") and mode != "t1":
+            self.exit_fallback()
+        elif fb and mode == "loom":
+            self.exit_fallback()
+
+    def meta_check_now(self):
+        """The button: ask Meta right now (one canary search) and switch template accordingly."""
+        try:
+            v = self.ports.ads_health()
+        except Exception:
+            v = None
+        self.st["meta_ok"] = {"at": now_ms(), "v": v}
+        self.st["health"] = {"at": now_ms(), "v": v}
+        mode = self.template_mode()
+        if v is True and self.fallback_on() and not (self.st["fb"] or {}).get("forced"):
+            self.exit_fallback()
+        elif v is False and mode == "auto" and not self.fallback_on():
+            self.enter_fallback("the Ad Library is not answering (checked by you)")
+        elif v is None:
+            self.st["cfMsg"] = "The helper was busy, so Meta was not checked. Try again in a minute."
+        self.save_state()
+
     def fallback_tick(self):
         fb = self.st.get("fb")
-        if not fb or time.time() < fb.get("next_check", 0):
+        if not fb or fb.get("forced") or time.time() < fb.get("next_check", 0):
             return
         try:
             v = self.ports.ads_health()
         except Exception:
             v = None
         fb["last_check"] = now_ms()
+        self.st["meta_ok"] = {"at": now_ms(), "v": v}
         if v is True:
             self.exit_fallback()
         elif v is False:
@@ -1245,13 +1289,21 @@ class Loop:
                     l["strategy"] = l.get("strategy") or "proposal"
                     l.pop("skipWhy", None)
                 elif r.get("status") == "skip":
-                    l["t1Skip"] = r.get("why") or "skipped"
-                    l["skipWhy"] = l["t1Skip"]
+                    l["skipWhy"] = r.get("why") or "skipped"
+                    if not re.search(r"send window|daily cap|too soon|at its cap", r.get("why") or "", re.I):    # "not now" reasons are tried again later
+                        l["t1Skip"] = l["skipWhy"]
                 self.commit()
             self.job(f"saving {len(todo)} Template 1 draft(s)", self.ports.email_drafts, [self.meta_payload(l) for l in todo], self.template_obj(), 10, on_line=on_line)
             self.commit()
+        self.t1_queue()
+
+    def t1_queue(self):
+        """Autopilot sends the drafts: every Template 1 draft (the fallback's, and, when 'send those too, even if I did not watch them' is on, the ones written with the 1 · First email button)
+        goes into the send queue, so sending hours and inbox limits decide when."""
         if self.send_auto():
-            q = [l for l in self.leads if l.get("autoT1") and l.get("draftedAt") and not l.get("emailedAt") and not self.queued(l) and not l.get("dnc")][:60]
+            unwatched = bool(self.g.get("loomSendChecked"))
+            q = [l for l in self.leads if (l.get("autoT1") or (unwatched and self.strat_of(l) == "proposal")) and l.get("draftedAt") and not l.get("emailedAt") and not self.queued(l)
+                 and not l.get("dnc") and not l.get("replied") and not l.get("bounced") and l.get("email") and self.strat_of(l) != "loom"][:60]
             if q:
                 try:
                     r = self.ports.queue_add([{"id": l["id"], "to": l.get("email"), "company": l.get("brandName") or l.get("company"), "lead": self.meta_payload(l), "template": self.template_obj(),
@@ -1293,6 +1345,10 @@ class Loop:
         self.commit()
         taken = len(batch)
         say(f"Template 1 for {taken} lead(s): contact forms first, then the plain first email…")
+        for _ in range(4):      # look for the forms of everything just taken (10 sites per look) before deciding who gets the email
+            if not [l for l in self.leads if l.get("autoT1") and not l.get("cform") and not l.get("cformSkip") and (l.get("cformTry") or 0) < 2 and not l.get("emailedAt")]:
+                break
+            self.cform_find(10)
         self.pipeline(True)
         self.t1_email_step()
         self.commit()
@@ -1330,6 +1386,7 @@ class Loop:
             if g.get("autoFollowUps") is not False:
                 if self.loom_queue_followups():
                     self.queue_sync()
+            self.apply_mode()
             self.fallback_tick()
             look = len([l for l in self.leads if l.get("videoAuto") and not l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("loomLink") and isinstance(l.get("video"), dict) and l["video"].get("ok")])
             stock0 = self.stock_now()
@@ -1340,7 +1397,8 @@ class Loop:
             if self.fallback_on():       # Meta is blocking the Ad Library: Template 1 keeps the volume up until it answers again
                 fb = self.st["fb"]
                 nxt = time.strftime("%-I:%M %p", time.localtime(fb.get("next_check", 0)))
-                self.why(f"Meta is blocking the Ad Library, so Template 1 (contact form first, then the plain email) carries the volume. {stock0} of {self.stock_goal()} saved. Next Meta check about {nxt}; Loom videos resume as soon as it answers.")
+                self.why((f"You chose Template 1 only: contact form first, then the plain email. {stock0} of {self.stock_goal()} saved." if fb.get("forced") else
+                          f"Meta is blocking the Ad Library, so Template 1 (contact form first, then the plain email) carries the volume. {stock0} of {self.stock_goal()} saved. Next Meta check about {nxt}; Loom videos resume as soon as it answers."))
                 self.run_begin("Automatic top-up (Template 1: Meta is blocking the Ad Library)")
                 rr = self.t1_round(min(25, need))
                 self.run_end("ok" if rr["taken"] else "warn", f"Template 1: {rr['taken']} lead(s) taken. Loom resumes when Meta answers (next check about {nxt})." if rr["taken"] else "No usable leads for Template 1 right now.")
@@ -1439,6 +1497,12 @@ class Loop:
             self.captcha_batch()
         elif k == "send_ready":
             self.send_ready_now()
+        elif k == "meta_check":
+            self.meta_check_now()
+        elif k == "mode":
+            self.st["after"] = 0
+            self.apply_mode()
+            self.st["keep_at"] = time.time() + 2
         elif k == "keep":
             self.st["after"] = 0
             self.st["keep_at"] = time.time() + 2
@@ -1549,7 +1613,7 @@ class Loop:
             out = {"ok": True, "now": now_ms(), "alive_at": int(self.alive_at * 1000), "started_at": int(self.t_started * 1000), "busy": self.busy_now, "auto": self.st.get("auto"), "beat": self.st.get("beat"),
                    "after": self.st.get("after"), "run": self.st.get("run"), "pipeMsg": self.st.get("pipeMsg"), "cfMsg": self.st.get("cfMsg"), "stock": stock,
                    "loom": self.loom_connected, "halcrus": self.hc_connected, "meta": self.meta_connected(), "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
-                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb")}
+                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb"), "meta_ok": self.st.get("meta_ok"), "mode": self.template_mode()}
             if not light:
                 out["routes"], out["t1"] = self.routes()
                 out["stats"] = self.channel_stats()

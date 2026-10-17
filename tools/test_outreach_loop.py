@@ -270,5 +270,43 @@ flp.st["after"] = 0
 run_rounds(flp, 2)
 check(len([l for l in fstore.all() if l.get("loomLink")]) >= 1, "Loom videos resume once Meta answers")
 
+# ------------------------------------------------------------------ 8. the template switch, and autopilot sending existing Template 1 drafts
+ctl(ad_blocked=False)
+flp.st["fb"] = None
+fstore.settings["templateMode"] = "t1"
+flp.apply_mode()
+check(flp.fallback_on() and flp.st["fb"]["forced"], "'Template 1 only' switches to Template 1 without asking Meta")
+flp.st["fb"]["next_check"] = 0
+flp.fallback_tick()
+check(flp.fallback_on(), "...and the Meta check never takes it back to Loom")
+fstore.settings["templateMode"] = "auto"
+flp.apply_mode()
+check(not flp.fallback_on(), "switching back to Auto follows Meta again (Loom when it answers)")
+ctl(ad_blocked=True)
+flp.request("meta_check")
+flp.step()
+check(flp.fallback_on() and flp.st["meta_ok"]["v"] is False, "'Check Meta now' with Meta blocked switches to Template 1")
+ctl(ad_blocked=False)
+flp.request("meta_check")
+flp.step()
+check(not flp.fallback_on() and flp.st["meta_ok"]["v"] is True, "'Check Meta now' with Meta answering switches back to Loom")
+fstore.settings["templateMode"] = "loom"
+ctl(ad_blocked=True)
+flp.st["fb"] = None
+flp.request("meta_check")
+flp.step()
+check(not flp.fallback_on(), "'Loom only' never falls back to Template 1")
+fstore.settings["templateMode"] = "auto"
+# a draft written earlier with the 1 · First email button is sent by autopilot ("send unwatched" on)
+fstore.add({"id": "ADold1", "company": "OldDraft", "email": "x@old1.test", "strategy": "proposal", "draftedAt": outreach_loop.now_ms() - 1000})
+fstore.commit()
+flp.t1_queue()
+check(any(i["id"] == "ADold1" for i in fports.queue), "autopilot schedules existing Template 1 drafts too")
+fstore.settings["loomSendChecked"] = False
+fstore.add({"id": "ADold2", "company": "OldDraft2", "email": "x@old2.test", "strategy": "proposal", "draftedAt": outreach_loop.now_ms() - 1000})
+fstore.commit()
+flp.t1_queue()
+check(not any(i["id"] == "ADold2" for i in fports.queue), "...but only when 'send unwatched' is on")
+
 print("\n%d failure(s)" % len(FAILS))
 sys.exit(1 if FAILS else 0)

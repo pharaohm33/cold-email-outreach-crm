@@ -566,7 +566,7 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     pg.wait_for_timeout(2500)
                     _cookie_banner(pg)
                     _dismiss_popups(pg)
-                    r = fill_form(pg, {**values, "message": it.get("message", "")}, lenient=True)
+                    r = fill_form(pg, {**values, "message": it.get("message", ""), **({"subject": it["subject"]} if it.get("subject") else {})}, lenient=True)
                 except Exception as e:
                     r = {"ok": False, "status": "failed", "note": str(e).splitlines()[0][:100]}
                 if not r["ok"]:

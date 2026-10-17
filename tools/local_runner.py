@@ -765,7 +765,7 @@ def run_cform_send(items, body):
                 continue
             log(f"[{n + 1}/{len(items)}] sending through the contact form: {it.get('url')}")
             try:
-                res = contact_form.submit(it["url"], {**values, "message": it.get("message", "")}, confirm=True, log=log)
+                res = contact_form.submit(it["url"], {**values, "message": it.get("message", ""), **({"subject": it["subject"]} if it.get("subject") else {})}, confirm=True, log=log)
             except Exception as e:
                 res = {"status": "failed", "note": "error: " + str(e).splitlines()[0][:120]}
             cform_record(it.get("id"), it.get("url"), res["status"])
@@ -1462,7 +1462,7 @@ class H(BaseHTTPRequestHandler):
             else:
                 if body.get("confirm") is not True:
                     return self._send(400, {"error": "needs confirm: true"})
-                items = [{"id": str(b.get("id") or "")[:80], "url": str(b.get("url") or "")[:500], "message": str(b.get("message") or "")[:3000]} for b in raw
+                items = [{"id": str(b.get("id") or "")[:80], "url": str(b.get("url") or "")[:500], "message": str(b.get("message") or "")[:3000], "subject": str(b.get("subject") or "")[:150]} for b in raw
                          if str(b.get("url") or "").startswith("http")][:(25 if kind == "send" else 250)]
                 target, args, label = (run_cform_send if kind == "send" else run_cform_batch), (items, body), (f"sending {len(items)} message(s) through contact forms" if kind == "send" else f"{len(items)} CAPTCHA form(s) in a window for you, 8 at a time")
             if not items:

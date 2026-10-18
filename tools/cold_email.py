@@ -537,7 +537,7 @@ def campaign_of(e):
     return e.get("campaign") or "clips"
 
 
-def run(leads, template, mode, limit=20, ignore_window=False, step=0, log_fn=print, sleep=time.sleep, campaign="clips"):
+def run(leads, template, mode, limit=20, ignore_window=False, step=0, log_fn=print, sleep=time.sleep, campaign="clips", should_stop=None):
     """mode 'drafts' or 'send'. Returns the list of result dicts. Sends one at a time with random spacing."""
     cfg = load_config()
     problems = []
@@ -551,6 +551,8 @@ def run(leads, template, mode, limit=20, ignore_window=False, step=0, log_fn=pri
         raise RuntimeError("; ".join(problems))
     results, first = [], True
     for item in plan(leads, template, mode, limit, ignore_window, step):
+        if should_stop and should_stop():     # the master pause: the unit in hand is finished, the rest of the batch is not started
+            break
         if item["status"] != "ready":
             log_fn(f"skip {item['to'] or item['name']}: {item['why']}")
             results.append(item)

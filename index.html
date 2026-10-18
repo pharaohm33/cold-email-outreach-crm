@@ -36,7 +36,7 @@ a{color:var(--acc)}.hide{display:none}.mut{color:var(--mut)}pre{white-space:pre-
 <header><b>Cold Email Outreach CRM</b>
 <div id="camp"></div>
 <nav id="nav"></nav>
-<span id="hl" style="margin-left:auto" class="mut"></span><span id="cp" style="margin-left:12px" class="mut"></span><span id="aw" style="margin-left:12px;cursor:pointer" class="mut"></span><span class="mut" id="sync"></span><span class="mut" id="clock"></span></header>
+<span id="hl" style="margin-left:auto" class="mut"></span><span id="cp" style="margin-left:12px" class="mut"></span><span id="pz" style="margin-left:12px;cursor:pointer" class="mut"></span><span id="aw" style="margin-left:12px;cursor:pointer" class="mut"></span><span class="mut" id="sync"></span><span class="mut" id="clock"></span></header>
 <main id="main"></main>
 <div id="ov" class="hide"></div>
 <script>
@@ -139,7 +139,7 @@ async function hsRun(){if(HS.busy){HS.again=true;return}
  try{hsCollect();const first=!S._hrev;
   sent={out:HS.out.splice(0),gone:HS.goneOut.splice(0),refetch:HS.refetch.splice(0),sset:HS.sset,sdel:HS.sdel};HS.sset={};HS.sdel=[];
   let r;try{const res=await fetch(RUNNER+'/crm/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rev:S._hrev||0,first,patches:sent.out,gone:sent.gone,refetch:sent.refetch,settings:{set:sent.sset,del:sent.sdel}})});r=await res.json();if(!res.ok||!r.ok)throw new Error((r&&r.error)||('HTTP '+res.status))}
-  catch(e){sent.out.forEach(hsQueue);HS.goneOut.unshift(...sent.gone);HS.refetch.push(...sent.refetch);Object.assign(HS.sset,sent.sset,HS.sset);HS.sdel=[...new Set([...sent.sdel,...HS.sdel])];HS.ok=false;HS.err=String(e.message||e);hsPersist();if(LOOP){LOOP=null;loopRefresh()}return}
+  catch(e){sent.out.forEach(hsQueue);HS.goneOut.unshift(...sent.gone);HS.refetch.push(...sent.refetch);Object.assign(HS.sset,sent.sset,HS.sset);HS.sdel=[...new Set([...sent.sdel,...HS.sdel])];HS.ok=false;HS.err=String(e.message||e);hsPersist();if(LOOP){LOOP=null;pzRender();loopRefresh()}return}
   HS.ok=true;HS.err='';hsApply(r)
  }finally{HS.busy=false;if(HS.again){HS.again=false;hsSoon(300)}}}
 function hsApply(r){let changed=false;S.adLeads=S.adLeads||[];const byId=new Map(S.adLeads.map(l=>[String(l.id),l]));
@@ -152,8 +152,18 @@ function hsApply(r){let changed=false;S.adLeads=S.adLeads||[];const byId=new Map
  for(const [k,v] of Object.entries(st.set||{})){if(k==='meta_resolved')continue;const cur=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k]);if(cur!==HS.sbase[k])continue;const j=JSON.stringify(v);if(j!==cur){S.settings[k]=v;changed=true}HS.sbase[k]=j}
  for(const k of st.del||[]){if(k==='meta_resolved')continue;const cur=S.settings[k]===undefined?undefined:JSON.stringify(S.settings[k]);if(cur!==HS.sbase[k])continue;if(k in S.settings){delete S.settings[k];changed=true}HS.sbase[k]=undefined}
  S._hrev=r.rev;HS.at=Date.now();save(true);hsPersist();loopApply(r.loop,changed)}
+/* master stop: finish the ONE unit in hand (a form, a draft, an upload, a video), then nothing runs and nothing is sent until Resume */
+function pzRender(){const e=document.getElementById('pz');if(!e)return;const p=LOOP&&LOOP.pause;
+ if(!LOOP){e.innerHTML='';return}
+ if(!p){e.innerHTML='<span title="Finishes the single send, draft, upload or video in hand, then stops everything (the loop and the send queue) and frees memory, so you can run heavy software. Click again to resume.">⏸ Pause outreach</span>';e.className='mut'}
+ else if(p.state==='pausing'){e.innerHTML='<b style="color:#e5a000" title="Finishing the unit in hand: '+esc(p.unit||'')+'. Nothing further starts.">⏸ Pausing… finishing 1 unit</b>';e.className=''}
+ else{e.innerHTML='<b style="color:#e5484d" title="Nothing is running or being sent. Click to resume.">▶ PAUSED'+(p.until&&p.until>Date.now()?' until '+new Date(p.until).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'')+': click to resume</b>';e.className=''}}
+async function pzClick(){if(!LOOP)return;try{if(LOOP.pause){await fetch(RUNNER+'/loop/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})}
+ else{const m=prompt('Pause everything after the unit in hand (one send, draft, upload or video; a video can take a few minutes).\n\nResume by itself after how many minutes? (0 = stay paused until you press Resume)','0');if(m===null)return;await fetch(RUNNER+'/loop/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes:Math.max(0,+m||0)})})}}catch(e){alert('The helper is not answering.')}
+ loopPoll()}
+setTimeout(()=>{const e=document.getElementById('pz');if(e)e.onclick=pzClick},0);
 /* the loop's status: run panel, why it paused, stock, routes of every lead */
-function loopApply(st,dataChanged){if(!st||!st.ok){return}const prev=LOOP;LOOP=st;
+function loopApply(st,dataChanged){if(!st||!st.ok){return}const prev=LOOP;LOOP=st;pzRender();
  if(st.loom!=null)LM.connected=st.loom;if(st.halcrus!=null)HC.connected=st.halcrus;
  SO.busy=!!(st.run&&st.run.state==='working');LM.pipeBusy=!!st.busy;
  if(st.run&&!(RUN.state==='working'&&RUN.local)&&((st.run.startedAt||0)>=(RUN.startedAt||0)||RUN.state==='idle')){const keep={stopAsked:RUN.stopAsked};Object.assign(RUN,st.run,{local:false});if(st.run.state==='working')RUN.stopAsked=keep.stopAsked}
@@ -1084,10 +1094,10 @@ function autoStatusLine(){const g=S.settings;if(!g.autoStart||!g.startConfirmed)
  if(!LOOP&&/not found|404/.test(HS.err||''))return '<div class="mut" style="margin-top:4px;color:#e5a000">Automatic top-up: the helper is running an older version that cannot run the loop. Restart it: <code>launchctl kickstart -k gui/$(id -u)/com.clipper.helper</code></div>';
  if(!LOOP)return '<div class="mut" style="margin-top:4px;color:#e5a000">Automatic top-up: the helper is not answering, so nothing is running. It starts at login; if it does not, open Terminal and run tools/start_outreach.command.</div>';
  if(LOOP.seeded===false)return '<div class="mut" style="margin-top:4px">Automatic top-up: waiting for this page to hand its leads and settings to the helper (it does that by itself within a few seconds of opening the CRM).</div>';
- const w=LOOP.auto,beat=LOOP.beat||0,ago=t=>{const m=Math.round((Date.now()-t)/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
+ const pz=LOOP.pause?`<b style="color:#e5484d">PAUSED by you${LOOP.pause.state==='pausing'?' (finishing the unit in hand)':''}.</b> `:'';const w=LOOP.auto,beat=LOOP.beat||0,ago=t=>{const m=Math.round((Date.now()-t)/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'};
  const silent=LOOP.alive_at&&Date.now()-LOOP.alive_at>5*60000;
  const tm=t=>new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
- return `<div class="mut" style="margin-top:4px">Automatic top-up: ${w?`<b>${esc(w.why)}</b>${w.until&&w.until>Date.now()?` Next try about ${tm(w.until)}.`:''} <span>(${ago(w.at)})</span>`:'no check yet.'} ${beat?`<span>Last checked ${ago(beat)}.</span>`:''} <span>It runs in the helper, so it keeps going with this page closed.</span>${LOOP.queued_requests?` <span>Your last press is queued behind "${esc(LOOP.busy||'the current step')}".</span>`:''}${silent?` <b style="color:#e5a000">The helper's loop has been silent for ${Math.round((Date.now()-LOOP.alive_at)/60000)} minutes. Restart it: <code>launchctl kickstart -k gui/$(id -u)/com.clipper.helper</code></b>`:''}${LOOP.error?` <span style="color:#e5a000">Last problem: ${esc(LOOP.error)}</span>`:''}</div>`}
+ return `<div class="mut" style="margin-top:4px">${pz}Automatic top-up: ${w?`<b>${esc(w.why)}</b>${w.until&&w.until>Date.now()?` Next try about ${tm(w.until)}.`:''} <span>(${ago(w.at)})</span>`:'no check yet.'} ${beat?`<span>Last checked ${ago(beat)}.</span>`:''} <span>It runs in the helper, so it keeps going with this page closed.</span>${LOOP.queued_requests?` <span>Your last press is queued behind "${esc(LOOP.busy||'the current step')}".</span>`:''}${silent?` <b style="color:#e5a000">The helper's loop has been silent for ${Math.round((Date.now()-LOOP.alive_at)/60000)} minutes. Restart it: <code>launchctl kickstart -k gui/$(id -u)/com.clipper.helper</code></b>`:''}${LOOP.error?` <span style="color:#e5a000">Last problem: ${esc(LOOP.error)}</span>`:''}</div>`}
 function autoKeep(){return loopAsk('keep')}   /* the helper decides when; this only wakes it */
 function loomWire(){const g=id=>document.getElementById(id),by=id=>(S.adLeads||[]).find(x=>x.id==id),sync=()=>{if(tab=='ads')adsV()};
  cformWire();

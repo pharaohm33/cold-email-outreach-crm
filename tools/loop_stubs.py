@@ -120,6 +120,12 @@ class StubPorts:
         self.notes.append({"title": title, "message": message, "key": key})
         record("notify", title=title, message=message, key=key)
 
+    def stop_soft(self):
+        record("stop_soft")
+
+    def release_memory(self):
+        record("release_memory")
+
     def ads_health(self):
         return not control()["ad_blocked"]
 

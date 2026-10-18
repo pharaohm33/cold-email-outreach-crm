@@ -308,5 +308,36 @@ fstore.commit()
 flp.t1_queue()
 check(not any(i["id"] == "ADold2" for i in fports.queue), "...but only when 'send unwatched' is on")
 
+# ------------------------------------------------------------------ 9. the master pause
+ctl(ad_blocked=False)
+flp.st["fb"] = None
+flp.abort = False
+r = flp.set_pause(0)
+check(r["ok"] and flp.is_paused() and flp.pause_view()["state"] == "paused", "pause: the loop reports paused when nothing is in hand")
+check(any(x["kind"] == "stop_soft" for x in slog()), "pause asks the running job to stop after the current unit (not to be killed)")
+ran = []
+check(flp.job("x", lambda: ["LINE"], on_line=ran.append) is False and not ran, "while paused the loop starts no new job")
+before = (len(slog("cform_send")), len(slog("draft")), len(slog("ad_video")))
+flp.st["keep_at"] = 0
+flp.st["pipe_at"] = 0
+flp.request("run", count=5)
+flp.step()
+flp.step()
+check(before == (len(slog("cform_send")), len(slog("draft")), len(slog("ad_video"))), "while paused no form, draft or video happens (not even a requested round)")
+check(any(x["kind"] == "release_memory" for x in slog()), "paused and idle: heavy memory is released")
+flp.save_state()
+flp2 = outreach_loop.Loop(fstore, fports, state_path=TMP + "/fb/loop.json", tick=1, start_delay=0)
+check(flp2.is_paused(), "a pause survives a helper restart")
+flp.set_pause(0.0005)      # resumes by itself
+time.sleep(0.1)
+check(not flp.is_paused(), "a timed pause ends by itself")
+flp.set_pause(0)
+flp.resume()
+check(not flp.is_paused() and flp.status()["pause"] is None, "resume clears it")
+flp.st["keep_at"] = 0
+flp.request("replies")
+flp.step()
+check(not flp.requests, "after resume requests are handled again")
+
 print("\n%d failure(s)" % len(FAILS))
 sys.exit(1 if FAILS else 0)

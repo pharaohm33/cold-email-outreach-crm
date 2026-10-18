@@ -89,7 +89,7 @@ class Loop:
         self.alive_at = 0
         self.t_started = time.time()
         self.sleep = time.sleep
-        self.st = {"meta_ok": None, "fb": None, "auto": None, "beat": 0, "after": 0, "health": {"at": 0, "v": None}, "cformRepAt": 0, "readyNotified": 0, "alerts": {}, "run": self._idle_run(),
+        self.st = {"pause": None, "meta_ok": None, "fb": None, "auto": None, "beat": 0, "after": 0, "health": {"at": 0, "v": None}, "cformRepAt": 0, "readyNotified": 0, "alerts": {}, "run": self._idle_run(),
                    "pipeMsg": "", "cfMsg": "", "pipe_at": 0, "keep_at": 0, "last_pipeline": 0}
         self._load_state()
 
@@ -441,6 +441,8 @@ class Loop:
     # ------------------------------------------------------------------ jobs
     def job(self, label, fn, *args, on_line=None, wait=1800):
         """Runs a helper job (one at a time) and feeds its output lines to on_line. Waits for the helper to be free; False if it never was."""
+        if self.is_paused():
+            return False
         self.busy_now = label
         try:
             return self.ports.run_job(label, fn, args, on_line, wait, lambda: self.abort)
@@ -1401,6 +1403,9 @@ class Loop:
                           f"Meta is blocking the Ad Library, so Template 1 (contact form first, then the plain email) carries the volume. {stock0} of {self.stock_goal()} saved. Next Meta check about {nxt}; Loom videos resume as soon as it answers."))
                 self.run_begin("Automatic top-up (Template 1: Meta is blocking the Ad Library)")
                 rr = self.t1_round(min(25, need))
+                if self.is_paused():
+                    self.run_end("warn", "Paused by you: the unit in hand was finished, nothing further was started.")
+                    return self.why("Paused by you. Press Resume when you want it to carry on.")
                 self.run_end("ok" if rr["taken"] else "warn", f"Template 1: {rr['taken']} lead(s) taken. Loom resumes when Meta answers (next check about {nxt})." if rr["taken"] else "No usable leads for Template 1 right now.")
                 self.queue_sync()
                 if rr["noLeads"]:
@@ -1417,6 +1422,9 @@ class Loop:
             self.why(f"Working: {stock0} of {self.stock_goal()} emails saved, making more.")
             self.run_begin("Automatic top-up")
             rr = self.start_outreach(min(10, need))
+            if self.is_paused():
+                self.run_end("warn", "Paused by you: the unit in hand was finished, nothing further was started.")
+                return self.why("Paused by you. Press Resume when you want it to carry on.")
             self.finish_from(rr)
             self.queue_sync()
             if rr.get("fatal"):
@@ -1445,6 +1453,47 @@ class Loop:
             raise
         finally:
             self.commit()
+
+    # ------------------------------------------------------------------ the master pause (use heavy software live)
+    def is_paused(self):
+        p = self.st.get("pause")
+        if p and p.get("until") and now_ms() >= p["until"]:
+            self.resume()
+            return False
+        return bool(p)
+
+    def set_pause(self, minutes=0):
+        """Finish the single unit in hand (one form message, one email draft, one upload, one video) and stop: no further unit of the batch starts, the loop starts no new job and the
+        send queue sends nothing more. Persisted, so a restart stays paused. Resumes by itself after `minutes` when given."""
+        self.st["pause"] = {"at": now_ms(), "until": now_ms() + int(minutes * 60000) if minutes else 0, "released": False}
+        self.abort = True
+        try:
+            self.ports.stop_soft()
+        except Exception:
+            pass
+        self.save_state()
+        return {"ok": True, "pause": self.pause_view()}
+
+    def resume(self):
+        self.st["pause"] = None
+        self.abort = False
+        self.st["after"] = 0
+        self.st["keep_at"] = time.time() + 3
+        self.st["pipe_at"] = 0
+        self.save_state()
+        self.wake.set()
+        return {"ok": True, "pause": None}
+
+    def pause_view(self):
+        p = self.st.get("pause")
+        if not p:
+            return None
+        working = bool(self.busy_now)
+        try:
+            working = working or bool(getattr(self.ports, "job_running", lambda: False)())
+        except Exception:
+            pass
+        return {"state": "pausing" if working else "paused", "at": p.get("at"), "until": p.get("until") or 0, "unit": self.busy_now}
 
     # ------------------------------------------------------------------ requests from the page's buttons
     def request(self, kind, **kw):
@@ -1513,6 +1562,18 @@ class Loop:
     def step(self):
         """One scheduling pass. Everything runs in this one thread, so two steps can never collide."""
         self.alive_at = time.time()
+        if self.is_paused():
+            with self.lock:
+                self.requests = []
+            p = self.st["pause"]
+            if not self.busy_now and not p.get("released"):     # idle now: free the heavy memory once
+                p["released"] = True
+                try:
+                    self.ports.release_memory()
+                except Exception:
+                    pass
+                self.save_state()
+            return
         with self.lock:
             reqs, self.requests = self.requests, []
         for r in reqs:
@@ -1613,7 +1674,7 @@ class Loop:
             out = {"ok": True, "now": now_ms(), "alive_at": int(self.alive_at * 1000), "started_at": int(self.t_started * 1000), "busy": self.busy_now, "auto": self.st.get("auto"), "beat": self.st.get("beat"),
                    "after": self.st.get("after"), "run": self.st.get("run"), "pipeMsg": self.st.get("pipeMsg"), "cfMsg": self.st.get("cfMsg"), "stock": stock,
                    "loom": self.loom_connected, "halcrus": self.hc_connected, "meta": self.meta_connected(), "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
-                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb"), "meta_ok": self.st.get("meta_ok"), "mode": self.template_mode()}
+                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb"), "meta_ok": self.st.get("meta_ok"), "mode": self.template_mode(), "pause": self.pause_view()}
             if not light:
                 out["routes"], out["t1"] = self.routes()
                 out["stats"] = self.channel_stats()

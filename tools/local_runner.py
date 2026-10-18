@@ -968,7 +968,7 @@ def run_email(leads, template, mode, limit, ignore_window, step, campaign="clips
     try:
         PIPE["stop"] = False
         cold_email_sleep = lambda secs: [time.sleep(1) for _ in range(int(secs)) if not PIPE["stop"]]
-        results = cold_email.run(leads, template, mode, limit=limit, ignore_window=ignore_window, step=step, log_fn=log, sleep=cold_email_sleep, campaign=campaign)
+        results = cold_email.run(leads, template, mode, limit=limit, ignore_window=ignore_window, step=step, log_fn=log, sleep=cold_email_sleep, campaign=campaign, should_stop=lambda: PIPE["stop"])
         for r in results:
             log("EMAIL " + json.dumps({k: r.get(k) for k in ("id", "to", "from", "status", "why", "subject", "step", "message_id", "template_id", "template_name")}))
         log(f"[runner] done: {sum(1 for r in results if r['status'] in ('sent', 'drafted'))} {mode} / {sum(1 for r in results if r['status'] == 'skip')} skipped / {sum(1 for r in results if r['status'] == 'failed')} failed")
@@ -1124,6 +1124,8 @@ def queue_loop():
                     print("reply scan:", e)
                 n = send_queue.reconcile()
             queue_keep_awake()
+            if LOOP is not None and LOOP.is_paused():     # master pause: nothing new is sent (a send already in progress has finished, they are one at a time)
+                continue
             job = STATE.get("job") or ""
             # the outreach loop keeps the helper busy most of the day (videos, contact forms); due emails must not wait for that. Only a job that writes drafts/sends mail itself blocks the queue.
             if (STATE["running"] and not (job and "draft" not in job.lower())) or not email_status()["ready"]:
@@ -1232,6 +1234,20 @@ class Ports:
         if not self.run_job("checking whether the Meta Ad Library answers", work, (), None, 0, lambda: False):
             return None    # the helper is busy: unsure
         return box.get("v")
+
+    def job_running(self):
+        return bool(STATE["running"])
+
+    def stop_soft(self):
+        """Finish the unit in hand (one form, one video, one draft, one upload), start no further one of the batch."""
+        PIPE["stop"] = True
+
+    def release_memory(self):
+        """Paused and idle: let go of the heavy things (the Dia voice server keeps a large model in memory). They start again on demand."""
+        try:
+            subprocess.run(["pkill", "-f", "tools/dia_server.py"], capture_output=True, timeout=10)
+        except Exception:
+            pass
 
     # --- the one-job-at-a-time runner
     def run_job(self, label, fn, args, on_line, wait, should_abort):
@@ -1398,6 +1414,14 @@ class H(BaseHTTPRequestHandler):
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})
             return self._send(200, LOOP.status(light=bool(body.get("light"))))
+        if self.path == "/loop/pause":     # the master stop: finish the ONE unit in hand, then nothing runs until /loop/resume (optionally resumes by itself after `minutes`)
+            if LOOP is None:
+                return self._send(503, {"error": "the outreach loop is off"})
+            return self._send(200, LOOP.set_pause(float(body.get("minutes") or 0)))
+        if self.path == "/loop/resume":
+            if LOOP is None:
+                return self._send(503, {"error": "the outreach loop is off"})
+            return self._send(200, LOOP.resume())
         if self.path == "/loop/request":   # the page's buttons: the loop does the work itself, one thing at a time
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})

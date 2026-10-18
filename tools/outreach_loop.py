@@ -774,7 +774,7 @@ class Loop:
                     l["cformTpl"] = "t1"
                     l["strategy"] = "proposal"
             self.commit()
-        limit = int(max(1, min(100, jsnum(self.g.get("cformDaily"), 25))))
+        limit = int(max(1, min(250, jsnum(self.g.get("cformDaily"), 25))))
         items = [{"id": l["id"], "url": l["cform"]["url"], "message": self.cform_text(l), "subject": self.cform_subject_for(l)} for l in lst]
         self.job(f"sending {len(items)} message(s) through contact forms", self.ports.cform_send, items, self.cform_vals(), limit, on_line=on_line)
         self.commit()

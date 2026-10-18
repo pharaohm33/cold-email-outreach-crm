@@ -36,7 +36,7 @@ a{color:var(--acc)}.hide{display:none}.mut{color:var(--mut)}pre{white-space:pre-
 <header><b>Cold Email Outreach CRM</b>
 <div id="camp"></div>
 <nav id="nav"></nav>
-<span id="hl" style="margin-left:auto" class="mut"></span><span id="cp" style="margin-left:12px" class="mut"></span><span id="pz" style="margin-left:12px;cursor:pointer" class="mut"></span><span id="aw" style="margin-left:12px;cursor:pointer" class="mut"></span><span class="mut" id="sync"></span><span class="mut" id="clock"></span></header>
+<span id="hl" style="margin-left:auto" class="mut"></span><span id="cp" style="margin-left:12px" class="mut"></span><span id="pz" style="margin-left:12px;cursor:pointer" class="mut"></span><span id="rs" style="margin-left:12px;cursor:pointer" class="mut" title="Restarts the helper (the background service that runs the loop and the send queue). Takes about 10 seconds. Nothing is lost; the unit in hand is cut off and redone.">⟳ Restart helper</span><span id="aw" style="margin-left:12px;cursor:pointer" class="mut"></span><span class="mut" id="sync"></span><span class="mut" id="clock"></span></header>
 <main id="main"></main>
 <div id="ov" class="hide"></div>
 <script>
@@ -162,6 +162,12 @@ async function pzClick(){if(!LOOP)return;try{if(LOOP.pause){await fetch(RUNNER+'
  else{const m=prompt('Pause everything after the unit in hand (one send, draft, upload or video; a video can take a few minutes).\n\nResume by itself after how many minutes? (0 = stay paused until you press Resume)','0');if(m===null)return;await fetch(RUNNER+'/loop/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({minutes:Math.max(0,+m||0)})})}}catch(e){alert('The helper is not answering.')}
  loopPoll()}
 setTimeout(()=>{const e=document.getElementById('pz');if(e)e.onclick=pzClick},0);
+async function rsClick(){const e=document.getElementById('rs');if(!confirm('Restart the helper now?\n\nIt takes about 10 seconds. Your leads and the loop\'s memory are saved first and nothing is lost; the form, draft, upload or video in hand is cut off and redone afterwards.'))return;
+ try{await fetch(RUNNER+'/helper/restart',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})}catch(x){alert('The helper is not answering, so it cannot be restarted from here. In Terminal: launchctl kickstart -k gui/$(id -u)/com.clipper.helper');return}
+ e.innerHTML='<b style="color:#e5a000">⟳ Restarting…</b>';LOOP=null;pzRender();
+ for(let i=0;i<40;i++){await new Promise(r=>setTimeout(r,2000));try{const r=await (await fetch(RUNNER+'/loop/status')).json();if(r&&r.ok){loopApply(r);e.innerHTML='⟳ Restart helper';return}}catch(x){}}
+ e.innerHTML='<b style="color:#e5484d">⟳ Helper did not come back: run launchctl kickstart -k gui/$(id -u)/com.clipper.helper in Terminal</b>'}
+setTimeout(()=>{const e=document.getElementById('rs');if(e)e.onclick=rsClick},0);
 /* the loop's status: run panel, why it paused, stock, routes of every lead */
 function loopApply(st,dataChanged){if(!st||!st.ok){return}const prev=LOOP;LOOP=st;pzRender();
  if(st.loom!=null)LM.connected=st.loom;if(st.halcrus!=null)HC.connected=st.halcrus;

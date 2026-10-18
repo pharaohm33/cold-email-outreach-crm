@@ -1162,6 +1162,56 @@ def queue_list_payload():
     return {"items": send_queue.listing(), "now": time.time(), "in_send_window": st["in_send_window"], "window": st["window"], "capacity_left": st["capacity_left"], "ready": st["ready"]}
 
 
+def browser_descendants():
+    """PIDs of the Chrome processes this helper started (through Playwright), found by walking the process tree below this process. Never touches your own Chrome."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    kids, cmd = {}, {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid, ppid = int(parts[0]), int(parts[1])
+        kids.setdefault(ppid, []).append(pid)
+        cmd[pid] = parts[2]
+    found, stack = [], [os.getpid()]
+    while stack:
+        for c in kids.get(stack.pop(), []):
+            stack.append(c)
+            if re.search(r"chrome|chromium", cmd.get(c, ""), re.I):
+                found.append(c)
+    return found
+
+
+def kill_stuck_browsers():
+    """A page that never answers can freeze a job for good. Closing the browser it is waiting on makes the waiting call fail, so the job moves on."""
+    import signal
+    n = 0
+    for pid in browser_descendants():
+        try:
+            os.kill(pid, signal.SIGKILL)
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+# how long a job may go without printing a line before it counts as stuck (seconds); a visible window waiting for you has no limit
+STALL = [("CAPTCHA", None), ("log in", None), ("Meta Ad Library answers", 180), ("looking for contact forms", 240), ("through contact forms", 600), ("making", 1500), ("uploading", 900),
+         ("HALCRUS", 900), ("email(s)", 1200), ("draft", 600)]
+STALL_DEFAULT = 900
+WATCHDOG_GRACE = 90
+
+
+def stall_limit(label):
+    for key, lim in STALL:
+        if key.lower() in label.lower():
+            return lim
+    return STALL_DEFAULT
+
+
 class Ports:
     """What the outreach loop (tools/outreach_loop.py) uses to touch the world. Job methods run in a helper job thread (one at a time); the rest answer at once."""
 
@@ -1263,12 +1313,15 @@ class Ports:
             if should_abort() or time.time() - t0 >= wait:
                 return False
             time.sleep(3)
-        since = 0
+        since, last_line, killed_at = 0, time.time(), 0
+        limit = stall_limit(label)
         while True:
             time.sleep(0.5)
             done = not STATE["running"]
             lines = STATE["log"][since:]
             since += len(lines)
+            if lines:
+                last_line = time.time()
             for ln in lines:
                 try:
                     on_line and on_line(ln)
@@ -1277,6 +1330,17 @@ class Ports:
             if done:
                 STATE.pop("job", None)
                 return True
+            if limit and time.time() - last_line > limit:      # watchdog: no output for too long, the job is frozen (a page that never answers)
+                if not killed_at:
+                    killed_at = time.time()
+                    n = kill_stuck_browsers()
+                    log(f"[runner] watchdog: '{label}' printed nothing for {int(limit)} s; closed {n} browser process(es) so it can move on")
+                    do_notify("A step got stuck", f"'{label}' froze and was cut off so the loop can carry on.", key="stuck-" + label[:30], every=3600, mac=False)
+                elif time.time() - killed_at > WATCHDOG_GRACE:         # closing the browser did not free it: give up on that job (the thread is abandoned)
+                    log(f"[runner] watchdog: '{label}' did not stop; abandoned")
+                    STATE["running"] = False
+                    STATE.pop("job", None)
+                    return True
 
     # --- job bodies (the same functions the page's buttons use)
     def loom_upload(self, items, show, keep_local):
@@ -1318,6 +1382,26 @@ class Ports:
 
 STORE = None
 LOOP = None
+
+
+def restart_helper():
+    time.sleep(0.6)
+    try:
+        if STORE is not None:
+            STORE.flush(True)
+        if LOOP is not None:
+            LOOP.save_state()
+    except Exception:
+        pass
+    label = f"gui/{os.getuid()}/com.clipper.helper"
+    try:
+        managed = subprocess.run(["launchctl", "print", label], capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        managed = False
+    if managed:
+        subprocess.Popen(["launchctl", "kickstart", "-k", label], start_new_session=True)     # launchd stops this process and starts a new one
+    else:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 class H(BaseHTTPRequestHandler):
@@ -1414,6 +1498,10 @@ class H(BaseHTTPRequestHandler):
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})
             return self._send(200, LOOP.status(light=bool(body.get("light"))))
+        if self.path == "/helper/restart":      # the page's Restart button: flush, then let launchd start a fresh helper (or re-exec when it was started by hand)
+            self._send(200, {"ok": True})
+            threading.Thread(target=restart_helper, daemon=True).start()
+            return
         if self.path == "/loop/pause":     # the master stop: finish the ONE unit in hand, then nothing runs until /loop/resume (optionally resumes by itself after `minutes`)
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})

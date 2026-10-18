@@ -543,6 +543,23 @@ def submit(url, values, confirm=False, show=False, log=print):
             b.close()
 
 
+_TRACKER = re.compile(r"monorail|analytics|collect|track|pixel|beacon|telemetry|/events?\b|/log\b|google|facebook|doubleclick|klaviyo|segment|hotjar|clarity|pinterest|tiktok|snapchat|criteo|bing|sentry|cloudflare|stripe|recaptcha|gstatic|fullstory|heap|mixpanel|amplitude|trustpilot|yotpo|gorgias|intercom|drift", re.I)
+_FORM_HOST = re.compile(r"form|hubspot|formspree|wufoo|jotform|typeform|getform|netlify|mailchimp|zapier|airtable|formsubmit|web3forms|formcarry", re.I)
+
+
+def _is_form_post(url, page_url):
+    """A POST that looks like the form being submitted (to the same site or a form service), not a tracker."""
+    try:
+        from urllib.parse import urlparse
+        u, pu = urlparse(url), urlparse(page_url)
+        if _TRACKER.search(url):
+            return False
+        reg = lambda h: ".".join((h or "").lower().split(".")[-2:])
+        return reg(u.hostname) == reg(pu.hostname) or bool(_FORM_HOST.search(u.hostname or ""))
+    except Exception:
+        return False
+
+
 def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: False, _hook=None, _headless=False, window=8):
     """For forms that have a CAPTCHA. Opens a VISIBLE Chrome window and keeps `window` tabs open at a time, every form already filled in (a rolling window, so one press can
     cover hundreds of forms without hundreds of tabs). YOU solve the CAPTCHA in a tab; the moment it is solved the send button is pressed, the result is reported, the tab closes
@@ -578,7 +595,9 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     return None
                 if _hook:
                     _hook(pg, it)
-                return {"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False, "manual": bool(r.get("missing")), "missing": r.get("missing") or []}
+                posts = []     # POSTs the page makes from now on: if you send the form yourself and close the tab, this is how a sent form is told from an unsent one
+                pg.on("request", lambda rq, _p=posts, _u=it["url"]: _p.append(time.time()) if rq.method == "POST" and _is_form_post(rq.url, _u) else None)
+                return {"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False, "manual": bool(r.get("missing")), "missing": r.get("missing") or [], "posts": posts}
 
             def top_up():
                 opened = False
@@ -601,7 +620,8 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                     done = None
                     try:
                         if pg.is_closed():
-                            done = {"status": "later", "note": "the tab was closed before it was sent"}
+                            done = ({"status": "unsure", "note": "the tab was closed right after the form was submitted (the site received it)"} if t["posts"]
+                                    else {"status": "later", "note": "the tab was closed before it was sent"})
                         elif t["pressed"]:
                             if _confirmed(pg, t["before"]):
                                 done = {"status": "sent", "note": "the page confirmed the message was sent"}
@@ -610,6 +630,8 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                         elif t["manual"]:   # something is left for you to choose (a drop-down...): you press send yourself; this only watches for the confirmation
                             if _confirmed(pg, t["before"]):
                                 done = {"status": "sent", "note": "the page confirmed the message was sent"}
+                            elif t["posts"] and time.time() - t["posts"][0] > 20:     # you pressed send; no recognisable confirmation text, but the site received the form
+                                done = {"status": "unsure", "note": "the form was submitted (the site received it) but showed no recognisable confirmation"}
                             elif time.time() - t["t0"] > wait_minutes * 60:
                                 done = {"status": "later", "note": f"not finished within {wait_minutes} minutes, saved for later"}
                         elif pg.evaluate(SOLVED_JS, None):
@@ -619,7 +641,8 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                             done = {"status": "later", "note": f"not solved within {wait_minutes} minutes, saved for later"}
                     except Exception as e:
                         if "closed" in str(e).lower():
-                            done = {"status": "later", "note": "the tab was closed before it was sent"}
+                            done = ({"status": "unsure", "note": "the tab was closed right after the form was submitted (the site received it)"} if t["posts"]
+                                    else {"status": "later", "note": "the tab was closed before it was sent"})
                     if done:
                         on_result({"id": t["id"], **done})
                         try:

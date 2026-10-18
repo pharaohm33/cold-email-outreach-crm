@@ -1064,7 +1064,7 @@ def queue_keep_awake():
     """While emails are waiting to go out in the next 13 hours the Mac is kept from idle-sleeping (caffeinate, renewed before it ends), and released when the queue is empty.
     Closing the lid still sleeps a laptop unless it is on power with an external display."""
     now = time.time()
-    soon = [i for i in send_queue.listing() if i["status"] in ("scheduled", "sending") and (i.get("due_at") or 0) - now < 13 * 3600]
+    soon = [i for i in send_queue.listing() if i["status"] in ("scheduled", "sending") and (i.get("due_at") or 0) - now < 13 * 3600] if not (LOOP is not None and LOOP.email_off()) else []
     st = awake_status()
     if LOOP is not None and LOOP.busy_now and not (soon or QUEUE_AWAKE["mine"]):   # the outreach loop is in the middle of a job (videos take a long time): do not let the Mac idle-sleep under it
         if not st["on"] or st["seconds_left"] < 900:
@@ -1124,6 +1124,8 @@ def queue_loop():
                     print("reply scan:", e)
                 n = send_queue.reconcile()
             queue_keep_awake()
+            if LOOP is not None and LOOP.email_off():      # forms only: scheduled emails are held (not cancelled) until email is switched on again
+                continue
             if LOOP is not None and LOOP.is_paused():     # master pause: nothing new is sent (a send already in progress has finished, they are one at a time)
                 continue
             job = STATE.get("job") or ""

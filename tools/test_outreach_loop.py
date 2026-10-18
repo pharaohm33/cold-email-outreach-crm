@@ -339,5 +339,38 @@ flp.request("replies")
 flp.step()
 check(not flp.requests, "after resume requests are handled again")
 
+# ------------------------------------------------------------------ 10. forms only (email switched off)
+os.makedirs(TMP + "/fo", exist_ok=True)
+ctl(ad_blocked=False, halcrus_pool=0)
+ostore = crm_store.Store(TMP + "/fo/crm.json")
+oports = loop_stubs.StubPorts()
+olp = outreach_loop.Loop(ostore, oports, state_path=TMP + "/fo/loop.json", tick=1, start_delay=0)
+olp.sleep = lambda s: None
+ostore.settings.update(SETTINGS)
+ostore.settings.update({"emailOff": True, "keepDays": 1, "cformDaily": 250, "cformFallbackHours": 1})
+for i in range(14):
+    ostore.add({"id": f"ADfo{i}", "company": f"Fo{i}", "email": f"o{i}@fo{i}{'-noform' if i % 3 == 0 else ('-captcha' if i % 5 == 1 else '')}.test", "score": 90 - i, "top": 1, "source": "halcrus"})
+ostore.commit()
+c0 = (len(slog("draft")), len(slog("queue_add")))
+check(olp.stock_goal() == 250, "forms only: the stock goal is days x forms per day, not inbox capacity")
+run_rounds(olp, 6)
+for _ in range(4):
+    olp.st["pipe_at"] = 0
+    olp.st["keep_at"] = time.time() + 999
+    olp.step()
+ol = ostore.all()
+check((len(slog("draft")), len(slog("queue_add"))) == c0, "forms only: no email draft and no scheduled send")
+nof = [l for l in ol if isinstance(l.get("cform"), dict) and not l["cform"].get("found")]
+check(nof and not [l for l in nof if isinstance(l.get("video"), dict)], "forms only: no video is made for a lead whose site has no form")
+check(len([l for l in ol if isinstance(l.get("cformSent"), dict)]) >= 3, "forms only: forms are being sent")
+cap = [l for l in ol if olp.cform_route(l) == "human"]
+for l in cap:
+    l["cform"]["at"] = outreach_loop.now_ms() - 5 * 3600e3
+check(cap and all(olp.cform_route(l) == "human" for l in cap), "forms only: an unsolved CAPTCHA form keeps waiting instead of falling back to email")
+check(olp.loom_queue_followups() == 0 and olp.loom_to_draft() == [], "forms only: no follow-up emails, no drafts")
+olp.request("send_ready")
+olp.step()
+check("switched off" in (olp.st.get("pipeMsg") or ""), "forms only: the send button says email is off")
+
 print("\n%d failure(s)" % len(FAILS))
 sys.exit(1 if FAILS else 0)

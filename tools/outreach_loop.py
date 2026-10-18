@@ -269,10 +269,14 @@ class Loop:
         if c.get("captcha") == "visible" or c.get("needs_human") or sent == "needs_human":
             h = self.g.get("cformFallbackHours")
             h = 48 if h is None else jsnum(h, 0)
-            if h > 0 and now_ms() - (c.get("at") or 0) > h * 3600e3:
-                return "email"
+            if h > 0 and now_ms() - (c.get("at") or 0) > h * 3600e3 and not self.email_off():
+                return "email"       # (with email switched off a CAPTCHA form keeps waiting for you instead)
             return "human"
         return "form-auto"
+
+    def email_off(self):
+        """Forms only: nothing is emailed (no drafts, no scheduled sends, no follow-ups); leads without a usable form are left alone."""
+        return bool(self.g.get("emailOff"))
 
     def email_route(self, l):
         return self.cform_route(l) == "email"
@@ -285,10 +289,14 @@ class Loop:
                 and not l.get("loomFail") and not l.get("dnc") and not l.get("emailedAt")]
 
     def loom_to_draft(self):
+        if self.email_off():
+            return []
         return [l for l in self.leads if l.get("videoAuto") and l.get("videoApproved") and l.get("loomLink") and not l.get("draftedAt") and not l.get("emailedAt")
                 and not l.get("dnc") and not l.get("loomSentAt") and self.email_route(l)]
 
     def loom_to_send_base(self, manual=False):
+        if self.email_off():
+            return []
         return [l for l in self.leads if l.get("videoAuto") and l.get("videoApproved") and (manual or not l.get("videoAutoApproved") or self.g.get("loomSendChecked")) and l.get("loomLink")
                 and l.get("draftedAt") and not l.get("emailedAt") and not l.get("dnc") and not self.queued(l) and self.email_route(l)]
 
@@ -300,12 +308,15 @@ class Loop:
             ine = l.get("ineligible")
             if (l.get("email") and not l.get("dnc") and not l.get("replied") and not l.get("contacted") and not l.get("emailedAt") and not l.get("loomSentAt") and not l.get("loomLink")
                     and not l.get("bounced") and not self.queued(l) and not l.get("removedAt") and not (isinstance(ine, dict) and t - (ine.get("at") or 0) < 6048e5)
-                    and self.strat_of(l) != "proposal" and not l.get("autoT1") and not (isinstance(v, dict) and (v.get("ok") or v.get("madeAt")))):
+                    and self.strat_of(l) != "proposal" and not l.get("autoT1") and not (isinstance(v, dict) and (v.get("ok") or v.get("madeAt")))
+                    and not (self.email_off() and isinstance(l.get("cform"), dict) and not l["cform"].get("found"))):
                 out.append(l)
         out.sort(key=lambda l: (0 if l.get("top") else 1, -jsnum(l.get("score"))))
         return out
 
     def stock_now(self):
+        if self.email_off():     # forms only: what is "saved" is the forms waiting to go out (or waiting for you), not drafts or scheduled emails
+            return len([l for l in self.leads if (self.strat_of(l) == "loom" or l.get("autoT1")) and self.pending_form(l) and not l.get("dnc") and not l.get("removedAt") and not l.get("replied")])
         return len([l for l in self.leads if (self.strat_of(l) == "loom" or l.get("autoT1")) and (l.get("draftedAt") or self.queued(l) or self.pending_form(l)) and not l.get("emailedAt") and not l.get("dnc")
                     and not l.get("removedAt") and not l.get("bounced") and not l.get("replied") and l.get("queueStatus") != "sent"])
 
@@ -317,6 +328,8 @@ class Loop:
         return int(max(1, min(7, jsnum(self.g.get("keepDays"), 2))))
 
     def stock_goal(self):
+        if self.email_off():
+            return self.keep_days() * int(max(1, min(250, jsnum(self.g.get("cformDaily"), 25))))
         return self.keep_days() * self.daily_cap()
 
     def fu_due(self, l):
@@ -332,10 +345,11 @@ class Loop:
 
     def pipeline_backlog(self):
         """Leads whose video is made (or on Loom) but whose draft / scheduled send / form message does not exist yet: they will become stock."""
+        done = ("form-done", "human", "form-auto") + (("email",) if self.email_off() else ())     # forms only: a lead with no form is a dead end, not stock on its way
         loom = len([l for l in self.leads if l.get("videoAuto") and l.get("videoApproved") and not l.get("emailedAt") and not l.get("dnc") and not l.get("removedAt") and not l.get("draftedAt")
-                    and not self.queued(l) and self.cform_route(l) not in ("form-done", "human", "form-auto")])
+                    and not self.queued(l) and self.cform_route(l) not in done])
         t1 = len([l for l in self.leads if l.get("autoT1") and not l.get("t1Skip") and not l.get("emailedAt") and not l.get("dnc") and not l.get("removedAt") and not l.get("draftedAt")
-                  and not self.queued(l) and self.cform_route(l) not in ("form-done", "human", "form-auto")])
+                  and not self.queued(l) and self.cform_route(l) not in done])
         return loom + t1
 
     def send_auto(self):
@@ -672,9 +686,13 @@ class Loop:
         self.save_state()
 
     # ----- contact forms
-    def cform_find(self, mx=10):
-        need = [l for l in self.leads if (l.get("loomLink") or self.t1_eligible(l)) and not l.get("cform") and not l.get("dnc") and not l.get("cformSkip") and (l.get("cformTry") or 0) < 2
-                and not (l.get("emailedAt") and not self.is_bounced(l))][:mx]
+    def cform_find(self, mx=10, only=None):
+        """Looks for contact forms. By default for leads that already have a Loom video / are Template 1 candidates; `only` = an explicit list (forms-only mode checks BEFORE spending a video)."""
+        if only is not None:
+            need = [l for l in only if not l.get("cform") and not l.get("cformSkip") and (l.get("cformTry") or 0) < 2 and not l.get("dnc")][:mx]
+        else:
+            need = [l for l in self.leads if (l.get("loomLink") or self.t1_eligible(l)) and not l.get("cform") and not l.get("dnc") and not l.get("cformSkip") and (l.get("cformTry") or 0) < 2
+                    and not (l.get("emailedAt") and not self.is_bounced(l))][:mx]
         if not need:
             return 0
         found = [0]
@@ -878,6 +896,8 @@ class Loop:
 
     # ----- queueing sends and follow-ups
     def loom_queue_followups(self):
+        if self.email_off():
+            return 0
         due = [(l, self.fu_due(l)) for l in self.leads]
         due = [(l, st) for l, st in due if st and (l.get("fuQueued") or 0) < st]
         if not due:
@@ -903,6 +923,9 @@ class Loop:
         return n
 
     def loom_queue_approved(self, manual=False):
+        if self.email_off():
+            self.st["pipeMsg"] = "Email is switched off (forms only), so nothing was scheduled."
+            return 0
         todo = self.loom_to_send_base(bool(manual))[:60]
         if not todo:
             return 0
@@ -1124,6 +1147,12 @@ class Loop:
                         if no:
                             say(f"{len(no)} lead(s) skipped before making a video ({'; '.join(list(dict.fromkeys(str(w) for _, w in no))[:2])}).")
                     pool = self.start_pool()
+                    if self.email_off():     # forms only: find out which sites have a form BEFORE a video is made for them
+                        todo = pool[:max(8, (target - made) * 3)]
+                        if [l for l in todo if not l.get("cform")]:
+                            say(f"Forms only: looking for a contact form on {len(todo)} site(s) before making any video…")
+                            self.cform_find(20, only=todo)
+                            pool = self.start_pool()
                 batch = pool[:min(5, target - made)]
                 if not batch:
                     say("No more leads to make videos for." if made else "There are no leads to make videos for.")
@@ -1273,6 +1302,8 @@ class Loop:
 
     def t1_email_step(self):
         """Template 1 by email for fallback leads whose site has no usable contact form: first-email draft, then (automatic mode) a scheduled send."""
+        if self.email_off():
+            return
         todo = [l for l in self.leads if l.get("autoT1") and self.cform_route(l) in ("email", "wait") and not l.get("draftedAt") and not self.queued(l) and not l.get("emailedAt")
                 and not l.get("dnc") and l.get("email") and not l.get("t1Skip") and not l.get("replied") and not l.get("bounced")][:10]
         if todo:
@@ -1302,7 +1333,7 @@ class Loop:
     def t1_queue(self):
         """Autopilot sends the drafts: every Template 1 draft (the fallback's, and, when 'send those too, even if I did not watch them' is on, the ones written with the 1 · First email button)
         goes into the send queue, so sending hours and inbox limits decide when."""
-        if self.send_auto():
+        if self.send_auto() and not self.email_off():
             unwatched = bool(self.g.get("loomSendChecked"))
             q = [l for l in self.leads if (l.get("autoT1") or (unwatched and self.strat_of(l) == "proposal")) and l.get("draftedAt") and not l.get("emailedAt") and not self.queued(l)
                  and not l.get("dnc") and not l.get("replied") and not l.get("bounced") and l.get("email") and self.strat_of(l) != "loom"][:60]
@@ -1340,6 +1371,14 @@ class Loop:
             say(f"Checking {len(probe)} email(s) before sending Template 1…")
             self.check_lead_emails(probe)
             pool = self.start_pool()
+        if self.email_off():
+            say("Forms only: checking which sites have a contact form first…")
+            for _ in range(3):
+                todo = [l for l in pool[:target * 2] if not l.get("cform")]
+                if not todo:
+                    break
+                self.cform_find(20, only=todo)
+                pool = self.start_pool()
         batch = pool[:target]
         for l in batch:
             l["autoT1"] = now_ms()
@@ -1503,6 +1542,10 @@ class Loop:
         return True
 
     def send_ready_now(self):
+        if self.email_off():
+            self.st["pipeMsg"] = "Email is switched off (forms only), so nothing was scheduled."
+            self.save_state()
+            return
         self.loom_status()
         n = self.loom_queue_approved(True)
         self.queue_sync()
@@ -1674,7 +1717,7 @@ class Loop:
             out = {"ok": True, "now": now_ms(), "alive_at": int(self.alive_at * 1000), "started_at": int(self.t_started * 1000), "busy": self.busy_now, "auto": self.st.get("auto"), "beat": self.st.get("beat"),
                    "after": self.st.get("after"), "run": self.st.get("run"), "pipeMsg": self.st.get("pipeMsg"), "cfMsg": self.st.get("cfMsg"), "stock": stock,
                    "loom": self.loom_connected, "halcrus": self.hc_connected, "meta": self.meta_connected(), "error": self.last_error, "lastPipeline": self.st.get("last_pipeline"),
-                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb"), "meta_ok": self.st.get("meta_ok"), "mode": self.template_mode(), "pause": self.pause_view()}
+                   "store": self.store.snapshot(), "queued_requests": len(self.requests), "seeded": bool(self.store.settings), "fallback": self.st.get("fb"), "meta_ok": self.st.get("meta_ok"), "mode": self.template_mode(), "pause": self.pause_view(), "email_off": self.email_off()}
             if not light:
                 out["routes"], out["t1"] = self.routes()
                 out["stats"] = self.channel_stats()

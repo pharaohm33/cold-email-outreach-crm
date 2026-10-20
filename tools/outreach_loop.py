@@ -58,6 +58,10 @@ def jsnum(x, default=0):
         return default
 
 
+# Template 1 through a contact form: no "reply here" (a form cannot be answered), it sends them to the website
+DEF_FORM_T1 = "Hey {first_name},\n\nI came across {business} while looking at brands that advertise on Meta.\n\n{product} connects to your existing Meta ads account, monitors your campaigns 24/7 and automatically cuts wasteful ad spend. There's no setup fee and no monthly fee. We only take 20% of the money we actually save you, and if we don't save you anything, you don't pay us anything.\n\nSee how it works here: {website}\n\n{sender}"
+
+
 def spin_first(text):
     """{a|b|c} -> a (what the page did for form subjects and messages)."""
     return re.sub(r"\{([^{}|]+)\|[^{}]*\}", r"\1", text)
@@ -405,14 +409,21 @@ class Loop:
                 l["greet"] = {"first": g.get("first"), "kind": g.get("kind"), "business": g.get("business"), "email": l["email"]}
         self.commit()
 
+    def form_site(self):
+        return self.g.get("formWebsite") or "http://AIadsOptimization.com"
+
+    def form_t1_text(self, m):
+        o = str(self.g.get("cformMsgT1") or "").strip()
+        return DEF_FORM_T1 if (not o or o == str(m.get("first") or "").strip()) else self.g.get("cformMsgT1")
+
     def cform_text(self, l):
         m = self.meta()
         t1 = not l.get("loomLink")
-        text = str((self.g.get("cformMsgT1") or m.get("first") or "") if t1 else (self.g.get("cformMsg") or m.get("loomEmail") or ""))
+        text = str(self.form_t1_text(m) if t1 else (self.g.get("cformMsg") or m.get("loomEmail") or ""))
         gr = l.get("greet")
         first = (gr.get("first") if isinstance(gr, dict) else None) or "there"
         text = re.sub(r"\{first_name\}|\{first\}", lambda _: first, text)
-        for k, v in (("business", self.gbiz(l)), ("loom_link", l.get("loomLink") or ""), ("product", m.get("product") or ""), ("link", m.get("link") or ""), ("sender", self.sender())):
+        for k, v in (("business", self.gbiz(l)), ("loom_link", l.get("loomLink") or ""), ("product", m.get("product") or ""), ("link", m.get("link") or ""), ("website", self.form_site()), ("sender", self.sender())):
             text = text.replace("{" + k + "}", str(v))
         return spin_first(text)
 
@@ -425,7 +436,7 @@ class Loop:
         return spin_first(str(self.meta().get("subject") or "Cutting wasted Meta ad spend").replace("{business}", str(self.gbiz(l))))
 
     def cform_vals(self):
-        return {"subject": self.cform_subject(), "company": self.meta().get("product") or "AI Ads Optimization", "website": "https://portal.aiadsoptimization.com"}
+        return {"subject": self.cform_subject(), "company": self.meta().get("product") or "AI Ads Optimization", "website": self.form_site()}
 
     def voice(self):
         v = self.g.get("adVoice")

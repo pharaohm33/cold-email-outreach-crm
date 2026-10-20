@@ -29,7 +29,7 @@ DATA = Path(os.getenv("CRM_DATA_DIR") or HERE)
 SETTINGS_KEYS = {
     "autoStart", "startConfirmed", "keepDays", "startTarget", "sendMode", "loomAuto", "loomAutoSend", "loomSendChecked", "videoAutoApprove",
     "autoFollowUps", "cformOn", "cformT1", "cformConfirmed", "cformFallbackHours", "cformDaily", "cformAnyTime", "cformSubject", "cformMsg",
-    "cformMsgT1", "jitbitCheck", "aiEmailCheck", "trustHalcrus", "halcrusTier", "adVoice", "videoName", "videoHost", "loomShow", "keepLocalVideos",
+    "cformMsgT1", "formWebsite", "jitbitCheck", "aiEmailCheck", "trustHalcrus", "halcrusTier", "adVoice", "videoName", "videoHost", "loomShow", "keepLocalVideos",
     "notifyReady", "runStrategy", "metaFallback", "templateMode", "emailOff", "apprStats", "meta_resolved", "outsideNote",
 }
 

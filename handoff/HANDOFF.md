@@ -144,6 +144,9 @@ Updating / restarting: the running helper keeps the old code until restarted (`l
 - loomPrefer(): before a Template 1 form message goes to a lead that is only eligible because the Ad Library stayed blocked, the page asks the helper (/ads/health: one headless search for a brand that surely advertises; skipped as busy while a job runs) whether Meta answers. Healthy -> adRetry/adTries cleared and the lead goes back to the Loom video (autoKeep restarted); unknown/busy -> the lead waits one more pass; still blocked -> Template 1 goes out. Leads with no Meta ads at all stay Template 1. Result cached 10 minutes.
 - "Turn on full autopilot" (Automatic mode and settings): sets AUTOPILOT (auto top-up, sendMode auto, loomAuto/loomAutoSend/loomSendChecked, follow-ups, contact forms + Template 1 fallback, cformFallbackHours 24, Jitbit check) after one confirm; click again to go back to approve-first (loomSendChecked off, sendMode ask). It still needs you for logins (Loom, HALCRUS) and CAPTCHAs; the helper owns the loop now, so no CRM tab has to stay open.
 
+## Template 1 through forms now points to the website (Oct 19)
+- Forms were not getting replies: the Template 1 form message was the cold email text ("...just reply here"), which cannot be answered through a form and had no link. Only the FORM version changed (the cold email Template 1, meta().first, is untouched): DEF_FORM_T1 (page index.html and tools/outreach_loop.py) is shorter and ends with "See how it works here: {website}". {website} = S.settings.formWebsite (default http://AIadsOptimization.com, editable next to the Template 1 form message in step 4), also used as the form's website field. A saved cformMsgT1 that is just the old email text counts as not customised; a custom one is kept. The Loom form message is unchanged.
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

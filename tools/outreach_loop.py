@@ -271,6 +271,8 @@ class Loop:
             return "email"
         if sent == "needs_human" and (l.get("cformTries") or 0) >= 3:
             return "email"
+        if (l.get("cformSkips") or 0) >= 2:
+            return "email"
         if c.get("captcha") == "visible" or c.get("needs_human") or sent == "needs_human":
             h = self.g.get("cformFallbackHours")
             h = 48 if h is None else jsnum(h, 0)
@@ -862,6 +864,8 @@ class Loop:
             if r.get("status") == "later":
                 l["cformLaterAt"] = now_ms()
                 l["cformLaterNote"] = r.get("note") or ""
+                if str(r.get("note") or "").startswith("skipped"):
+                    l["cformSkips"] = (l.get("cformSkips") or 0) + 1      # skipped twice: the form is probably broken, so it stops coming back
             else:
                 l["cformSent"] = {"at": now_ms(), "status": r.get("status"), "note": r.get("note") or "", "shot": r.get("shot") or ""}
                 if r.get("status") == "needs_human":

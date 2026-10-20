@@ -151,6 +151,9 @@ Updating / restarting: the running helper keeps the old code until restarted (`l
 - The CAPTCHA window works in ROUNDS now: contact_form.captcha_batch opens `window` forms (S.settings.cformRound, default 5, 1-10), all pre-filled; as each CAPTCHA is solved by the person the form is sent and its tab closes; NO new tab opens until the whole round is done and the person presses "Next N forms" (helper /cform/batch/control {action: next|stop}; "Stop, come back later" closes the window, open forms stay saved). cformAutoNext (default off) opens the next round by itself; nobody asking for 60 minutes closes the window. The queue can pile up as much as it likes (cap 250 per press). Status lines (CFORMSTATUS) feed the loop's cfMsg: "Round 2: 3 open, 5 sent so far, 12 more waiting".
 - Template 1 form subject is now "Free ads optimization performance base" (S.settings.cformSubjectT1, editable in step 4; the Loom form subject is unchanged). The website-link Template 1 form message got an immediate reply on a real form.
 
+## Skip the open round (Oct 19)
+- "Skip these N" next to Next/Stop in step 4 (/cform/batch/control {action: skip}): every tab of the open CAPTCHA round is closed and reported 'later' ("skipped by you"), the forms stay saved, and the next round opens at once. A form skipped twice (l.cformSkips >= 2) is treated as broken and stops coming back (route 'email'; with email off it just stays parked).
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

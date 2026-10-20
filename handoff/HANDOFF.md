@@ -147,6 +147,10 @@ Updating / restarting: the running helper keeps the old code until restarted (`l
 ## Template 1 through forms now points to the website (Oct 19)
 - Forms were not getting replies: the Template 1 form message was the cold email text ("...just reply here"), which cannot be answered through a form and had no link. Only the FORM version changed (the cold email Template 1, meta().first, is untouched): DEF_FORM_T1 (page index.html and tools/outreach_loop.py) is shorter and ends with "See how it works here: {website}". {website} = S.settings.formWebsite (default http://AIadsOptimization.com, editable next to the Template 1 form message in step 4), also used as the form's website field. A saved cformMsgT1 that is just the old email text counts as not customised; a custom one is kept. The Loom form message is unchanged.
 
+## CAPTCHA rounds and the Template 1 form subject (Oct 19)
+- The CAPTCHA window works in ROUNDS now: contact_form.captcha_batch opens `window` forms (S.settings.cformRound, default 5, 1-10), all pre-filled; as each CAPTCHA is solved by the person the form is sent and its tab closes; NO new tab opens until the whole round is done and the person presses "Next N forms" (helper /cform/batch/control {action: next|stop}; "Stop, come back later" closes the window, open forms stay saved). cformAutoNext (default off) opens the next round by itself; nobody asking for 60 minutes closes the window. The queue can pile up as much as it likes (cap 250 per press). Status lines (CFORMSTATUS) feed the loop's cfMsg: "Round 2: 3 open, 5 sent so far, 12 more waiting".
+- Template 1 form subject is now "Free ads optimization performance base" (S.settings.cformSubjectT1, editable in step 4; the Loom form subject is unchanged). The website-link Template 1 form message got an immediate reply on a real form.
+
 ## Photo
 tools/assets/narrator.jpg is cropped with the face centered in the circle bubble.
 

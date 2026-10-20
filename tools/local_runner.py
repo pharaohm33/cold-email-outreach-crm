@@ -777,6 +777,17 @@ def run_cform_send(items, body):
         STATE["running"] = False
 
 
+BATCH_CTL = {"next": False}
+
+
+def _batch_next():
+    """True once when the person pressed 'Next 5' in the CRM."""
+    if BATCH_CTL["next"]:
+        BATCH_CTL["next"] = False
+        return True
+    return False
+
+
 def run_cform_batch(items, body):
     """CAPTCHA forms: a visible Chrome window, every form filled in; you solve each CAPTCHA, it presses send and moves on. Tabs left alone for 10 minutes are saved for later."""
     try:
@@ -787,7 +798,13 @@ def run_cform_batch(items, body):
             if r.get("status") in ("sent", "unsure"):
                 cform_record(r.get("id"), "", r["status"])
             log("CFORMSEND " + json.dumps(r))
-        contact_form.captcha_batch(items, values, wait_minutes=10, on_result=result, stop=lambda: PIPE["stop"])
+        v = body.get("values") or {}
+        window = max(1, min(10, int(v.get("window") or body.get("window") or 5)))
+        BATCH_CTL["next"] = False
+        PIPE["stop"] = False
+        contact_form.captcha_batch(items, values, wait_minutes=10, on_result=result, stop=lambda: PIPE["stop"], window=window,
+                                   next_round=None if (v.get("autoNext") or body.get("autoNext")) else _batch_next,
+                                   on_status=lambda st: log("CFORMSTATUS " + json.dumps(st)))
         log("[runner] CAPTCHA forms finished.")
     finally:
         STATE["running"] = False
@@ -1935,6 +1952,13 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "phone": False, "phone_configured": phone_ready(), "muted": "clips alerts are off"})
             sent = do_notify(body.get("title"), body.get("message"), body.get("key"), body.get("every") or 600, phone=bool(body.get("phone", True)))
             return self._send(200, {"ok": True, "phone": sent, "phone_configured": phone_ready()})
+        if self.path == "/cform/batch/control":   # the CAPTCHA window: 'next' opens the next round, 'stop' closes the window (what is open stays saved for later)
+            act = str(body.get("action") or "")
+            if act == "next":
+                BATCH_CTL["next"] = True
+            elif act == "stop":
+                PIPE["stop"] = True
+            return self._send(200, {"ok": act in ("next", "stop"), "action": act})
         if self.path == "/ads/health":   # is the Meta Ad Library answering right now? (one search for a brand that certainly advertises)
             if STATE["running"]:
                 return self._send(200, {"healthy": None, "busy": True})

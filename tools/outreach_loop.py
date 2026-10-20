@@ -59,6 +59,7 @@ def jsnum(x, default=0):
 
 
 # Template 1 through a contact form: no "reply here" (a form cannot be answered), it sends them to the website
+DEF_FORM_T1_SUBJECT = "Free ads optimization performance base"
 DEF_FORM_T1 = "Hey {first_name},\n\nI came across {business} while looking at brands that advertise on Meta.\n\n{product} connects to your existing Meta ads account, monitors your campaigns 24/7 and automatically cuts wasteful ad spend. There's no setup fee and no monthly fee. We only take 20% of the money we actually save you, and if we don't save you anything, you don't pay us anything.\n\nSee how it works here: {website}\n\n{sender}"
 
 
@@ -433,7 +434,7 @@ class Loop:
     def cform_subject_for(self, l):
         if l.get("loomLink"):
             return self.cform_subject()
-        return spin_first(str(self.meta().get("subject") or "Cutting wasted Meta ad spend").replace("{business}", str(self.gbiz(l))))
+        return self.g.get("cformSubjectT1") or DEF_FORM_T1_SUBJECT
 
     def cform_vals(self):
         return {"subject": self.cform_subject(), "company": self.meta().get("product") or "AI Ads Optimization", "website": self.form_site()}
@@ -838,11 +839,20 @@ class Loop:
             self.st["cfMsg"] = "Allow contact forms first (the one-time question in step 4)."
             return 0
         self.greet(lst)
-        self.st["cfMsg"] = f"Working through {len(lst)} form(s) in a Chrome window, 8 at a time. Solve each CAPTCHA there."
+        rnd = max(1, min(10, int(self.g.get("cformRound") or 5)))
+        self.st["cfMsg"] = f"Opening the first {min(rnd, len(lst))} of {len(lst)} CAPTCHA form(s) in a Chrome window. Solve each CAPTCHA there."
         self.save_state()
         n = [0]
 
         def on_line(t):
+            stt = parse_tag(t, "CFORMSTATUS")
+            if stt:
+                if stt.get("state") == "round done":
+                    self.st["cfMsg"] = f"Round {stt.get('round')} done: {stt.get('sent')} sent so far, {stt.get('waiting')} more waiting. Press \"Next {rnd} forms\" when you are ready, or \"Stop\" to come back later."
+                elif stt.get("state") == "working":
+                    self.st["cfMsg"] = f"Round {stt.get('round')}: {stt.get('open')} open, {stt.get('sent')} sent so far, {stt.get('waiting')} more waiting. Solve the CAPTCHAs in the open tabs."
+                self.save_state()
+                return
             r = parse_tag(t, "CFORMSEND")
             if not r:
                 return
@@ -864,7 +874,7 @@ class Loop:
             self.commit()
         items = [{"id": l["id"], "url": l["cform"]["url"], "message": self.cform_text(l), "subject": self.cform_subject_for(l)} for l in lst]
         try:
-            self.job(f"{len(items)} CAPTCHA form(s) in a window for you, 8 at a time", self.ports.cform_batch, items, self.cform_vals(), on_line=on_line, wait=3600)
+            self.job(f"{len(items)} CAPTCHA form(s) in a window for you, {rnd} at a time", self.ports.cform_batch, items, {**self.cform_vals(), "window": rnd, "autoNext": bool(self.g.get("cformAutoNext"))}, on_line=on_line, wait=14400)
         finally:
             self.st["cfMsg"] = f"CAPTCHA forms: {n[0]} sent." if n[0] else ""
             self.commit()

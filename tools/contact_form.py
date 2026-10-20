@@ -560,17 +560,19 @@ def _is_form_post(url, page_url):
         return False
 
 
-def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: False, _hook=None, _headless=False, window=8):
-    """For forms that have a CAPTCHA. Opens a VISIBLE Chrome window and keeps `window` tabs open at a time, every form already filled in (a rolling window, so one press can
-    cover hundreds of forms without hundreds of tabs). YOU solve the CAPTCHA in a tab; the moment it is solved the send button is pressed, the result is reported, the tab closes
-    and the next form opens and is filled in. A tab you do not get to within `wait_minutes` (counted from when it opened) is closed and reported as 'later', so the lead stays saved.
-    The CAPTCHA itself is never touched by this code.
+def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: False, _hook=None, _headless=False, window=5, next_round=None, on_status=lambda s: None, idle_minutes=60):
+    """For forms that have a CAPTCHA. Opens a VISIBLE Chrome window with ROUNDS of `window` tabs (5 by default), every form already filled in. YOU solve the CAPTCHA in a tab; the
+    moment it is solved the send button is pressed, the result is reported and the tab closes. NO new tab opens until the whole round is done and `next_round()` says the person
+    wants the next one (so you can do all five, then continue). next_round=None keeps the old rolling behaviour (a new tab opens as soon as one closes). If nobody asks for the next
+    round for `idle_minutes` the window closes and the rest stays saved. A tab you do not get to within `wait_minutes` is closed and reported as 'later'. on_status gets
+    {round, open, waiting, sent, state}. The CAPTCHA itself is never touched by this code.
     items: [{id, url, message}], values: {name, email, phone, subject, company, website}. on_result gets {id, status, note}."""
     from playwright.sync_api import sync_playwright
     if not items:
         return
     DEBUG.mkdir(exist_ok=True)
     pending, tabs = list(items), []   # tabs: {id, pg, t0, before, btn, pressed}
+    counters = {"round": 0, "sent": 0}
     with sync_playwright() as p:
         b = _ctx(p, not _headless)
         try:
@@ -599,8 +601,16 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                 pg.on("request", lambda rq, _p=posts, _u=it["url"]: _p.append(time.time()) if rq.method == "POST" and _is_form_post(rq.url, _u) else None)
                 return {"id": it["id"], "pg": pg, "t0": time.time(), "before": pg.url, "btn": r["btn"], "pressed": False, "manual": bool(r.get("missing")), "missing": r.get("missing") or [], "posts": posts}
 
-            def top_up():
+            def status(state):
+                try:
+                    on_status({"round": counters["round"], "open": len(tabs), "waiting": len(pending), "sent": counters["sent"], "state": state})
+                except Exception:
+                    pass
+
+            def top_up(new_round=False):
                 opened = False
+                if new_round:
+                    counters["round"] += 1
                 while pending and len(tabs) < window and not stop():
                     t = open_one(pending.pop(0))
                     if t:
@@ -611,8 +621,10 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                         tabs[0]["pg"].bring_to_front()
                     except Exception:
                         pass
+                status("working")
 
-            top_up()
+            top_up(True)
+            idle_since = None
             while (tabs or pending) and not stop():
                 time.sleep(1.2)
                 for t in list(tabs):
@@ -644,6 +656,8 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                             done = ({"status": "unsure", "note": "the tab was closed right after the form was submitted (the site received it)"} if t["posts"]
                                     else {"status": "later", "note": "the tab was closed before it was sent"})
                     if done:
+                        if done["status"] in ("sent", "unsure"):
+                            counters["sent"] += 1
                         on_result({"id": t["id"], **done})
                         try:
                             if not pg.is_closed():
@@ -651,16 +665,27 @@ def captcha_batch(items, values, wait_minutes=10, on_result=print, stop=lambda: 
                         except Exception:
                             pass
                         tabs.remove(t)
+                        status("working" if tabs else "round done")
                         if tabs:
                             try:
                                 tabs[0]["pg"].bring_to_front()
                             except Exception:
                                 pass
-                top_up()
-            for t in tabs:  # stopped
+                if next_round is None:
+                    top_up()   # rolling: a new form opens as soon as a slot is free
+                elif not tabs and pending:
+                    status("round done")   # the whole round is finished: wait for the person to ask for the next one
+                    idle_since = idle_since or time.time()
+                    if next_round():
+                        idle_since = None
+                        top_up(True)
+                    elif time.time() - idle_since > idle_minutes * 60:
+                        break
+                else:
+                    idle_since = None
+            for t in tabs:  # stopped (or nobody came back): what is still open is saved for later; forms that were never opened are simply still waiting
                 on_result({"id": t["id"], "status": "later", "note": "stopped"})
-            for it in pending:
-                on_result({"id": it["id"], "status": "later", "note": "stopped"})
+            status("finished")
         finally:
             b.close()
 

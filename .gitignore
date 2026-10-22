@@ -43,11 +43,3 @@ tools/stub_control.json
 tools/stub_log.jsonl
 tools/.meta_profile/
 tools/meta_session.json
-
-# lip sync engine (MuseTalk Apple Silicon port): its own venv and ~4 GB of weights
-tools/.musetalk/
-
-# studio output (voices, photos, videos made)
-tools/studio_out/
-tools/studio_voices/
-tools/studio_photos/

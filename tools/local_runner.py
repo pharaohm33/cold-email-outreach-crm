@@ -8,7 +8,7 @@ Start it once and leave the window open:
 It only listens on 127.0.0.1 and only accepts requests from this site (or localhost). Your keys live in
 tools/.env (copy tools/.env.example) and are never sent to the browser.
 """
-import base64, json, os, random, re, shutil, subprocess, sys, threading, time
+import json, os, random, re, subprocess, sys, threading, time
 import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime
@@ -1485,20 +1485,6 @@ class H(BaseHTTPRequestHandler):
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})
             self._send(200, LOOP.status())
-        elif u.path == "/studio/file":   # a finished video or voice sample from tools/studio_out (only that folder)
-            import lipsync_studio as LS
-            name = os.path.basename(parse_qs(u.query).get("f", [""])[0])
-            f = LS.OUT / name
-            if name.endswith((".mp4", ".wav")) and f.is_file():
-                data = f.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "video/mp4" if name.endswith(".mp4") else "audio/wav")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            return self._send(404, {"error": "no such file"})
         elif u.path == "/awake":
             self._send(200, awake_status())
         elif u.path == "/clipper/templates":
@@ -1984,52 +1970,6 @@ class H(BaseHTTPRequestHandler):
             elif act == "stop":
                 PIPE["stop"] = True
             return self._send(200, {"ok": act in ("next", "skip", "stop"), "action": act})
-        if self.path.startswith("/studio/"):   # voice + lip sync studio (tools/lipsync_studio.py)
-            try:
-                import lipsync_studio as LS
-                act = self.path[len("/studio/"):]
-                if act == "status":
-                    LS.engine_idle_check()
-                    return self._send(200, LS.status())
-                if act == "narrator":
-                    f = HERE / "assets" / "narrator.jpg"
-                    return self._send(200, {"image_b64": base64.b64encode(f.read_bytes()).decode()} if f.exists() else {"error": "No narrator photo found."})
-                if act == "voices":
-                    return self._send(200, {"voices": LS.voices()})
-                if act == "engine":
-                    if body.get("action") == "stop":
-                        LS.engine_stop()
-                        return self._send(200, {"ok": True})
-                    threading.Thread(target=lambda: LS.engine_start(), daemon=True).start()
-                    return self._send(200, {"ok": True, "starting": True})
-                if act == "clone":
-                    v = LS.clone_voice(str(body.get("name") or "My voice")[:60], base64.b64decode(body.get("audio_b64") or ""), bool(body.get("consent")), str(body.get("note") or "")[:200])
-                    return self._send(200, {"ok": True, "voice": v})
-                if act == "delete_voice":
-                    d = LS.VOICES_DIR / os.path.basename(str(body.get("id") or "").replace("clone:", ""))
-                    if d.is_dir() and d.parent == LS.VOICES_DIR:
-                        shutil.rmtree(d, ignore_errors=True)
-                    return self._send(200, {"ok": True})
-                if act == "make":
-                    text = str(body.get("text") or "").strip()
-                    if not body.get("image_b64"):
-                        return self._send(400, {"error": "Choose a photo first."})
-                    if not text and not body.get("audio_b64"):
-                        return self._send(400, {"error": "Write what the voice should say, or upload an audio file."})
-                    jid = LS.start_job(text[:6000], str(body.get("voice") or "kokoro:am_michael"), base64.b64decode(body["image_b64"]), str(body.get("quality") or "balanced"),
-                                       base64.b64decode(body["audio_b64"]) if body.get("audio_b64") else None, max(0.8, min(1.4, float(body.get("speed") or 1.0))))
-                    return self._send(200, {"ok": True, "id": jid})
-                if act == "job":
-                    j = LS.JOBS.get(str(body.get("id") or ""))
-                    return self._send(200, j or {"state": "unknown"})
-                if act == "preview":
-                    wav = LS.OUT / ("preview_" + str(abs(hash(str(body.get("voice")))))[:8] + ".wav")
-                    LS.OUT.mkdir(exist_ok=True)
-                    secs = LS.say(str(body.get("text") or "Hi, I took a look at your Facebook ads and found something worth a minute of your time.")[:300], str(body.get("voice")), wav)
-                    return self._send(200, {"ok": True, "file": wav.name, "seconds": secs})
-                return self._send(404, {"error": "unknown studio action"})
-            except Exception as e:
-                return self._send(200, {"error": str(e)[:300], "ok": False})
         if self.path == "/ads/health":   # is the Meta Ad Library answering right now? (one search for a brand that certainly advertises)
             if STATE["running"]:
                 return self._send(200, {"healthy": None, "busy": True})

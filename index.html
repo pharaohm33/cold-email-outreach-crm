@@ -187,7 +187,7 @@ const iso=d=>{const x=d||new Date();return x.getFullYear()+'-'+String(x.getMonth
 const today=()=>iso();const money=n=>'$'+Number(n||0).toLocaleString(undefined,{maximumFractionDigits:2});
 const addDays=(d,n)=>{const x=new Date(d+'T00:00');x.setDate(x.getDate()+n);return iso(x)};
 const monthKey=()=>today().slice(0,7);
-let tab='dash';const TABS=[['dash','Dashboard'],['today','Today'],['leads','Leads'],['email','Email'],['audit','Audit'],['unibox','Unibox'],['calls','Calls'],['ads','Meta Ads'],['studio','Voice & Lip Sync'],['find','Find Podcasts'],['money','Money'],['guide','Growth guide'],['settings','Settings']];
+let tab='dash';const TABS=[['dash','Dashboard'],['today','Today'],['leads','Leads'],['email','Email'],['audit','Audit'],['unibox','Unibox'],['calls','Calls'],['ads','Meta Ads'],['find','Find Podcasts'],['money','Money'],['guide','Growth guide'],['settings','Settings']];
 const CAMPS=[['clips','Podcast clips','#e5484d'],['meta','Meta ads','#2f6fed'],['audit','Audit','#8b5cf6']];
 const TAB_CAMP={today:'clips',leads:'clips',email:'clips',calls:'clips',find:'clips',ads:'meta',audit:'audit'}; // dashboard, money and settings are shared
 const CAMP_HOME={clips:'email',meta:'ads',audit:'audit'};
@@ -215,7 +215,7 @@ function stats(){
  return{earned,owed,dl,remaining:Math.max(0,S.settings.goal-earned),sentToday:sentOn(today()),sentAll,rep,cl,
   fresh:S.leads.filter(l=>l.status=='New').length,fu:S.leads.filter(l=>l.status=='Sample Sent'&&l.follow&&l.follow<=today()).length,...mrrStats()}}
 function mrrStats(){const act=(S.retainers||[]).filter(r=>r.status=='Active'),mrr=act.reduce((a,r)=>a+(+r.fee||0),0);return{mrr,act:act.length,clipsM:act.reduce((a,r)=>a+(+r.clips||0),0),avgFee:act.length?mrr/act.length:0}}
-function render(){nav();({dash,today:todayV,leads,email:emailV,audit:auV,unibox:uniboxV,calls:callsV,ads:adsV,studio:()=>{studioV();if(!STU.st)studioLoad()},find,money:moneyV,guide:guideV,settings})[tab]()}
+function render(){nav();({dash,today:todayV,leads,email:emailV,audit:auV,unibox:uniboxV,calls:callsV,ads:adsV,find,money:moneyV,guide:guideV,settings})[tab]()}
 function dash(){const s=stats(),g=S.settings;const pct=Math.min(100,s.earned/g.goal*100);const chanCard=(S.adLeads||[]).some(l=>l.loomLink||l.cformSent)?`<div class="card"><b>Meta ads outreach, by channel</b><div class=mut style="margin-top:4px">${channelLine()}</div></div>`:'';
  const days=[...Array(14)].map((_,i)=>{const d=iso(new Date(Date.now()-(13-i)*864e5));return[d,sentOn(d)]});const mx=Math.max(g.daily,...days.map(x=>x[1]));
  const byInf={};S.payments.forEach(p=>{(byInf[p.who]=byInf[p.who]||{all:0,mo:0}).all+=p.amount;if(p.date.startsWith(monthKey()))byInf[p.who].mo+=p.amount});
@@ -1811,69 +1811,6 @@ function settings(){const g=S.settings,f=(k,l,t='number')=>`<div><label>${l}</la
  $('#pl').onclick=async()=>{if(!confirm('Replace local leads/payments with the Sheet data?'))return;const j=await syncCall('pull');if(j){Object.assign(S,j.state);localStorage.setItem('clipperCRM',JSON.stringify(S));render()}};
  $('#ex').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(S,null,1)],{type:'application/json'}));a.download='clipper-crm-'+today()+'.json';a.click()};
  $('#im').onchange=async e=>{try{S=Object.assign({},DEF,JSON.parse(await e.target.files[0].text()));save();alert('Imported.');render()}catch(x){alert('Bad file')}}}
-/* ---------- Voice & Lip Sync studio: pick or clone a voice, add a photo, get a talking video (the work happens in the helper, tools/lipsync_studio.py) ---------- */
-const STU={st:null,voices:[],photo:null,photoName:'',audio:null,audioName:'',job:null,jobT:0,msg:'',busy:false,previewing:'',open:null};
-async function studioApi(act,body){try{return await (await fetch(RUNNER+'/studio/'+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})).json()}catch(e){return {error:'The helper is not running.'}}}
-const stuFile=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(f)});
-async function studioLoad(){STU.st=await studioApi('status');const v=await studioApi('voices');STU.voices=v.voices||[];if(tab==='studio')studioV()}
-function stuQ(){const q=S.settings.stuQuality;return ['fast','balanced','high'].includes(q)?q:'balanced'}
-function stuVoice(){return S.settings.stuVoice||'kokoro:am_michael'}
-function stuEstimate(text){const words=String(text||'').trim().split(/\s+/).filter(Boolean).length,secs=Math.max(0,Math.round(words/2.7)),mult={fast:1,balanced:1.5,high:2.5}[stuQ()];return {secs,take:Math.round(secs*mult+15)}}
-function studioV(){const st=STU.st||{},eng=st.engine_installed,V=STU.voices,q=stuQ(),est=stuEstimate((document.getElementById('stu-text')||{}).value||S.settings.stuText||''),j=STU.job;
- const chip=(ok,t,w)=>`<span style="margin-right:10px;white-space:nowrap;color:${ok?'#22c55e':w?'#e5a000':'#e5484d'}">${ok?'●':'○'} ${t}</span>`;
- const vcard=v=>`<label style="display:block;border:1px solid ${stuVoice()===v.id?'var(--acc)':'var(--bd,#2a3344)'};border-radius:8px;padding:8px 10px;margin:4px 0;cursor:pointer"><input type="radio" name="stu-voice" value="${esc(v.id)}" ${stuVoice()===v.id?'checked':''}> <b>${esc(v.name)}</b> <span class=mut>${v.source==='preset'?'built in':v.source==='cloned'?'your clone':'from VoiceStudio'}${v.note&&v.source!=='preset'?' · '+esc(v.note):''}</span> <button class="b" data-stuprev="${esc(v.id)}" style="margin-left:8px">${STU.previewing===v.id?'…':'▶ Hear it'}</button>${v.source==='cloned'?` <button class="b" data-studel="${esc(v.id)}" title="Remove this cloned voice">✕</button>`:''}</label>`;
- const step=(n,t,sub)=>`<div style="display:flex;gap:8px;align-items:baseline;margin-top:18px;padding-top:10px;border-top:1px solid var(--bd,#2a3344)"><span style="background:var(--acc);color:#fff;border-radius:50%;min-width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px">${n}</span><b>${t}</b> <span class=mut>${sub||''}</span></div>`;
- $('#main').innerHTML=`<div class="card" style="border-color:var(--acc)"><b>Voice &amp; lip sync studio</b> <span class=mut>Turn a photo into a talking video with the voice you choose. Everything runs on this Mac.</span>
-  <div style="margin-top:6px">${chip(eng,eng?'Lip-sync engine installed':'Lip-sync engine not installed')}${chip(st.engine_up,st.engine_up?'engine running (warm: next video is faster)':'engine off (starts by itself, about a minute the first time)',true)}${chip(st.voicestudio_up,st.voicestudio_up?'VoiceStudio connected':'VoiceStudio not running (open the app for cloned voices)',true)}</div>
-  <details data-sec="stu-guide" ${(S.settings.secOpen||{})['stu-guide']===false?'':'open'} style="margin-top:8px"><summary><b>Easy guide</b> <span class=mut>4 steps, plus how to keep it fast without losing quality. Click to open or close.</span></summary>
-   <ol style="margin:8px 0 0 18px;line-height:1.55"><li><b>Pick a voice.</b> Press "Hear it" on a few. Built-in voices are instant. To use <i>your own voice</i>, add a clean 10 to 30 second recording under "Add my own voice".</li>
-    <li><b>Add a photo.</b> A front-facing photo with the mouth relaxed, even light, no hand or microphone near the face. Your usual narrator photo is one click.</li>
-    <li><b>Write what it says</b> (or upload your own audio). Keep it under about 45 seconds per clip; longer scripts are better as two clips.</li>
-    <li><b>Choose Fast, Balanced or High and press Make.</b> The video appears below with a download link.</li></ol>
-   <div class=mut style="margin-top:8px"><b>Keep it quick, keep it sharp:</b> make drafts on <b>Fast</b>, then the final on <b>High</b>. Reuse the same photo: its face is learned once and kept, so every later video skips that wait. The engine stays warm for 15 minutes, so make your clips back to back. Short clips are the biggest saving (time is roughly the clip length). Use a sharp photo up to 1280 px: the lips are always drawn at full detail, a bigger photo only costs time.</div></details>
-  ${step(1,'Choose a voice','press Hear it to try one')}
-  <div style="margin-top:6px">${V.length?V.map(vcard).join(''):'<span class=mut>Loading voices…</span>'}</div>
-  <details data-sec="stu-clone" style="margin-top:8px"><summary><b>Add my own voice</b> <span class=mut>clone a voice from a recording</span></summary>
-   <div class=mut style="margin:6px 0">Use a clear recording of <b>your own voice</b>, or one you have the owner's permission to use: 10 to 30 seconds, one person, no music or noise. It is stored only on this Mac. Cloned voices are spoken by VoiceStudio, so open that app first.</div>
-   <div class="row"><input id="stu-cname" placeholder="Name, for example My voice" style="width:200px"><input type="file" id="stu-cfile" accept="audio/*,video/*"></div>
-   <div class="row" style="margin-top:6px"><label><input type="checkbox" id="stu-cok"> This is my own voice, or I have permission to clone it.</label></div>
-   <div class="row" style="margin-top:6px"><button class="b p" id="stu-clone">Save this voice</button></div></details>
-  ${step(2,'Add a photo',STU.photoName?'using '+esc(STU.photoName):'')}
-  <div class="row" style="margin-top:6px"><input type="file" id="stu-photo" accept="image/*"><button class="b" id="stu-narr">Use my usual narrator photo</button></div>
-  ${STU.photo?`<img src="data:image/jpeg;base64,${STU.photo}" style="max-height:160px;border-radius:8px;margin-top:6px;border:1px solid var(--bd,#2a3344)">`:''}
-  ${step(3,'What should it say?','or upload audio instead')}
-  <textarea id="stu-text" rows="5" style="width:100%;margin-top:6px" placeholder="Hey, I took a look at your Facebook ads...">${esc(S.settings.stuText||'')}</textarea>
-  <div class="row" style="margin-top:4px"><label class=mut>Or use your own audio file instead of the text <input type="file" id="stu-audio" accept="audio/*"></label>${STU.audioName?`<span class=mut>using ${esc(STU.audioName)} <button class="b" id="stu-noaudio">remove</button></span>`:''}</div>
-  ${step(4,'Speed, quality and make it','the faster quality choices are for drafts')}
-  <div class="row" style="margin-top:6px"><label>Speaking speed <select id="stu-speed">${[['1','Normal'],['1.15','Brisk'],['1.25','Fast (like your ads)']].map(([v,t])=>`<option value="${v}" ${String(S.settings.stuSpeed||'1')===v?'selected':''}>${t}</option>`).join('')}</select></label> <span class=mut>Built-in voices only. Normal looks most natural for lip sync.</span></div>
-  <div class="row" style="margin-top:6px">${['fast','balanced','high'].map(k=>`<label style="margin-right:14px"><input type="radio" name="stu-q" value="${k}" ${q===k?'checked':''}> <b>${(st.qualities&&st.qualities[k]||{}).label||k}</b> <span class=mut>${(st.qualities&&st.qualities[k]||{}).about||''}</span></label>`).join('')}</div>
-  <div class="row" style="margin-top:8px"><button class="b p" id="stu-make" ${STU.busy||!eng?'disabled':''}>▶ Make the talking video</button><span class=mut id="stu-est">${est.secs?`About ${est.secs}s of speech, roughly ${est.take}s to make${st.engine_up?'':' (+ about a minute to wake the engine the first time)'}.`:''}</span><span class=mut>${esc(STU.msg)}</span></div>
-  <div id="stu-job">${stuJobHTML()}</div></div>
-  <div class="card"><b>Recent videos</b> ${(st.history||[]).length?`<div class="tw"><table><tr><th>Made</th><th>Voice</th><th>Length</th><th>Quality</th><th>Took</th><th></th></tr>${(st.history||[]).map(h=>`<tr><td>${new Date((h.at||0)*1000).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}<div class=mut style="max-width:260px">${esc((h.text||'').slice(0,70))}</div></td><td>${esc(String(h.voice||'').replace(/^\w+:/,''))}</td><td>${h.seconds||''}s</td><td>${esc(h.quality||'')}</td><td>${(h.timings||{}).total||''}s</td><td><a href="${RUNNER}/studio/file?f=${encodeURIComponent(h.file||'')}" target="_blank" rel="noopener">Open</a></td></tr>`).join('')}</table></div>`:'<span class=mut>Nothing yet.</span>'}</div>`;
- studioWire()}
-function stuJobHTML(){const j=STU.job;if(!j)return '';const t=j.timings||{};
- if(j.state==='done')return `<div style="margin-top:10px"><video controls playsinline src="${RUNNER}/studio/file?f=${encodeURIComponent(j.file)}" style="max-width:100%;max-height:420px;border-radius:10px;background:#000"></video><div class=mut style="margin-top:4px">Done in <b>${t.total}s</b> for a ${j.seconds}s clip. Voice ${t.voice||0}s · photo ${t.photo||0}s · engine start ${t.engine_start||0}s · learning the face ${t.face||0}s · lips ${t.lipsync||0}s. <a href="${RUNNER}/studio/file?f=${encodeURIComponent(j.file)}" download>Download</a></div></div>`;
- if(j.state==='failed')return `<div style="margin-top:10px;color:#e5484d"><b>Stopped:</b> ${esc(j.error||'something went wrong')}</div>`;
- return `<div style="margin-top:10px"><b>${esc(j.step||'Working')}…</b> <span class=mut>${Math.round((Date.now()-STU.jobT)/1000)}s so far</span></div>`}
-function studioWire(){const g=id=>document.getElementById(id);
- document.querySelectorAll('input[name=stu-voice]').forEach(r=>r.onchange=()=>{S.settings.stuVoice=r.value;save()});
- document.querySelectorAll('input[name=stu-q]').forEach(r=>r.onchange=()=>{S.settings.stuQuality=r.value;save();studioV()});
- g('stu-text').oninput=e=>{S.settings.stuText=e.target.value;const est=stuEstimate(e.target.value);g('stu-est').textContent=est.secs?`About ${est.secs}s of speech, roughly ${est.take}s to make.`:''};
- g('stu-speed').onchange=e=>{S.settings.stuSpeed=e.target.value;save()};
- g('stu-photo').onchange=async e=>{const f=e.target.files[0];if(!f)return;STU.photo=await stuFile(f);STU.photoName=f.name;studioV()};
- g('stu-narr').onclick=async()=>{const r=await studioApi('narrator');if(r.image_b64){STU.photo=r.image_b64;STU.photoName='your narrator photo';studioV()}else STU.msg=r.error||'No narrator photo found.'};
- g('stu-audio').onchange=async e=>{const f=e.target.files[0];if(!f)return;STU.audio=await stuFile(f);STU.audioName=f.name;studioV()};
- if(g('stu-noaudio'))g('stu-noaudio').onclick=()=>{STU.audio=null;STU.audioName='';studioV()};
- g('stu-clone').onclick=async()=>{const f=g('stu-cfile').files[0];if(!f){STU.msg='Choose a recording first.';return studioV()}STU.msg='Saving the voice…';studioV();
-  const r=await studioApi('clone',{name:g('stu-cname').value||'My voice',audio_b64:await stuFile(f),consent:g('stu-cok').checked});STU.msg=r.error||'Voice saved. Pick it in step 1.';if(!r.error){S.settings.stuVoice=r.voice.id;save()}await studioLoad();studioV()};
- g('stu-make').onclick=async()=>{if(!STU.photo){STU.msg='Add a photo first (step 2).';return studioV()}STU.msg='';STU.busy=true;STU.job={state:'working',step:'Sending',timings:{}};STU.jobT=Date.now();studioV();
-  const r=await studioApi('make',{text:S.settings.stuText||'',voice:stuVoice(),quality:stuQ(),speed:+(S.settings.stuSpeed||1),image_b64:STU.photo,audio_b64:STU.audio||undefined});
-  if(r.error||!r.id){STU.busy=false;STU.job=null;STU.msg=r.error||'Could not start.';return studioV()}
-  for(;;){await new Promise(x=>setTimeout(x,1500));const j=await studioApi('job',{id:r.id});STU.job=j;const el=document.getElementById('stu-job');if(el)el.innerHTML=stuJobHTML();if(tab!=='studio')continue;if(j.state==='done'||j.state==='failed'||j.error==='The helper is not running.'){break}}
-  STU.busy=false;await studioLoad();studioV()}}
-document.addEventListener('click',async e=>{const p=e.target.closest('[data-stuprev]'),d=e.target.closest('[data-studel]');
- if(p){STU.previewing=p.dataset.stuprev;studioV();const r=await studioApi('preview',{voice:STU.previewing});STU.previewing='';if(r.file){const a=new Audio(RUNNER+'/studio/file?f='+encodeURIComponent(r.file));a.play().catch(()=>{})}else STU.msg=r.error||'';studioV()}
- else if(d){if(!confirm('Remove this cloned voice from this Mac?'))return;await studioApi('delete_voice',{id:d.dataset.studel});await studioLoad()}});
 setInterval(()=>$('#clock').textContent=new Date().toLocaleString([],{weekday:'short',hour:'numeric',minute:'2-digit'}),1000);
 async function mergePull(){if(!S.settings.syncUrl||!S.settings.syncPw)return;const j=await syncCall('pull');if(!j)return;
  const have=new Set(S.leads.map(l=>l.id));let n=0;for(const l of j.state.leads||[]){if(!have.has(l.id)){S.leads.push(l);have.add(l.id);n++}}

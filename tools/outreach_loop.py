@@ -1526,10 +1526,27 @@ class Loop:
             return False
         return bool(p)
 
+    # what "Keep going by itself" and "Full autopilot" turn on; stopping or pausing for good turns these off so nothing restarts until you turn them on again
+    AUTO_KEYS = {"autoStart": False, "loomAuto": False, "loomAutoSend": False, "loomSendChecked": False, "sendMode": "ask"}
+
+    def switch_off(self):
+        for k, v in self.AUTO_KEYS.items():
+            self.store.set_setting(k, v)
+        self.abort = True
+        try:
+            self.ports.stop_soft()
+        except Exception:
+            pass
+        self.store.commit()
+        self.save_state()
+        return {"ok": True}
+
     def set_pause(self, minutes=0):
         """Finish the single unit in hand (one form message, one email draft, one upload, one video) and stop: no further unit of the batch starts, the loop starts no new job and the
         send queue sends nothing more. Persisted, so a restart stays paused. Resumes by itself after `minutes` when given."""
         self.st["pause"] = {"at": now_ms(), "until": now_ms() + int(minutes * 60000) if minutes else 0, "released": False}
+        if not minutes:      # paused until you resume: also switch the automatic modes off (a timed pause is meant to carry on by itself)
+            self.switch_off()
         self.abort = True
         try:
             self.ports.stop_soft()

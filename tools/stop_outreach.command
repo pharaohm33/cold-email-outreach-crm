@@ -8,7 +8,11 @@ stop_port() {  # $1 = port, $2 = label
   if [ -n "$pids" ]; then kill $pids 2>/dev/null; echo "Stopped $2."; else echo "$2 was not running."; fi
 }
 
-stop_port 8765 "the helper"            # first, so it cannot restart the clipper app
+# Switch the automatic modes off first (they are saved, so they would restart the loop as soon as the helper comes back), and unload the
+# login agent: its KeepAlive would otherwise restart the helper seconds after it is stopped. start_outreach.command loads it again.
+curl -s -m 5 -X POST http://127.0.0.1:8765/loop/off -d '{}' >/dev/null 2>&1 && echo "Switched Keep going by itself / Full autopilot off."
+launchctl bootout "gui/$(id -u)/com.clipper.helper" 2>/dev/null && echo "Stopped the helper from restarting by itself."
+stop_port 8765 "the helper"            # so it cannot restart the clipper app
 pkill -f "fit_check.py" 2>/dev/null
 pkill -f "google_ai_to_crm.py" 2>/dev/null
 sleep 1

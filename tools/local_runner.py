@@ -1534,6 +1534,10 @@ class H(BaseHTTPRequestHandler):
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})
             return self._send(200, LOOP.set_pause(float(body.get("minutes") or 0)))
+        if self.path == "/loop/off":       # stop script / Stop button: switch the automatic modes off (they stay off until you turn them on); not a pause
+            if LOOP is None:
+                return self._send(503, {"error": "the outreach loop is off"})
+            return self._send(200, LOOP.switch_off())
         if self.path == "/loop/resume":
             if LOOP is None:
                 return self._send(503, {"error": "the outreach loop is off"})
